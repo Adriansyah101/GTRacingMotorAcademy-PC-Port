@@ -1,0 +1,14 @@
+add-on\ (optional)
+==================
+
+This folder is for extra content: more cars (Dodge, Ferrari, Hyundai), the paid edition's extra licence
+tests and its 44 kHz audio.  IMPORTANT.TXT next to gtracing.exe says where to find out more.
+
+Each add-on is a folder of its own inside this one, for example:
+    add-on\hyundai\...
+    add-on\premium-audio\...
+
+The game reads them at the next start.  To turn an add-on off, delete its folder or move it out of add-on\.
+A save that holds an add-on car still loads without that add-on: the car is hidden until the folder is back.
+
+The game never reads this note.

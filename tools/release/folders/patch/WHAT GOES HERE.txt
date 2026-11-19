@@ -1,0 +1,13 @@
+patch\ (optional)
+=================
+
+This folder is for the PC menus: Options > Display (the picture settings), the keys page in
+Options > Controls, the Exit tile on the main menu and the Name tile on the multiplayer page.
+
+It is empty in this release because those menus are the game's own menu files with changes, and the game's
+files are not shared here.  IMPORTANT.TXT next to gtracing.exe says where to find out more.
+
+The files go straight into this folder (patch\<file>), not into a folder inside it.  The game reads them at
+the next start.  Without them the game runs with its own menus, and gtracing.ini holds the settings.
+
+The game never reads this note.

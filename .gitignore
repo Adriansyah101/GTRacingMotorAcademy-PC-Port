@@ -1,0 +1,32 @@
+# Game files (Gameloft's): never part of this repository
+*.app/
+!tools/release/folders/GTRacingFreemiumHD.app/
+tools/release/folders/GTRacingFreemiumHD.app/*
+!tools/release/folders/GTRacingFreemiumHD.app/*.txt
+GTRacingFreeAndroid*/
+com.gameloft.*/
+*.obb
+*.ipa
+*.apk
+iTunesArtwork
+
+# Internal development log (session history): kept next to the code, never published
+internal/
+
+# Generated from the game and build output
+analysis/
+build/
+__pycache__/
+*.pyc
+
+# Local screenshots, logs, saves and dumps
+art/
+/*.png
+/*.jpg
+*.log
+*.dmp
+home*/
+
+# The leaderboard server's local state (holds the Cloudflare account id)
+cloud/redbull-board/.wrangler/
+cloud/redbull-board/node_modules/
