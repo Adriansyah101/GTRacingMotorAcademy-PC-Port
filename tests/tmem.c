@@ -1,6 +1,3 @@
-/* Sparse guest memory for the difference tests (ARM_TEST_MEM).
- * Pages are filled from the game image or, elsewhere, from a pattern that
- * the Python side reproduces for Unicorn; written bytes are marked per page. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +21,7 @@ static const u8 *img;
 static u32 img_base, img_size;
 static Page *pages[MAXPAGES];
 static int npages;
-static int hash[HASH];          /* index + 1 into pages, 0 = empty */
+static int hash[HASH];
 static u32 last_page = 0xFFFFFFFFu;
 static Page *last;
 
@@ -99,7 +96,6 @@ EXPORT void tm_reset(void)
     last = NULL;
 }
 
-/* Written byte addresses (up to max). */
 EXPORT int tm_written(u32 *out, int max)
 {
     int n = 0;
@@ -115,7 +111,6 @@ EXPORT int tm_written(u32 *out, int max)
 EXPORT int tm_peek(u32 a) { return tm_ld8(a); }
 EXPORT u32 tm_last_site(void) { return tm_site; }
 
-/* Stage 3 runtime entry points: in the tests they end the run. */
 typedef struct CPU CPU;
 void rt_trap(CPU *c, u32 site, int kind) { (void)c; tm_site = site; tm_bail(100 + kind); }
 void rt_call_indirect(CPU *c, u32 t) { (void)c; tm_site = t; tm_bail(3); }

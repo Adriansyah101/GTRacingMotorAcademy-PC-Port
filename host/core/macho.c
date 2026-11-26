@@ -1,4 +1,3 @@
-/* Mach-O reader, from the Fast Five host (core/macho.c), for the armv7 GT Racing binary. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,7 +47,6 @@ static uint32_t name_hash(const char *s)
     return h;
 }
 
-/* symbol-table entry: strx, type, sect, desc, value */
 static const uint8_t *nlist(const macho *m, uint32_t i)
 {
     return m->data + m->symoff + 12 * i;
@@ -65,19 +63,19 @@ static int build_hash(macho *m)
     uint32_t cap = 1;
     while (cap < m->nsyms * 2)
         cap <<= 1;
-    m->hash = calloc(cap, sizeof *m->hash);     /* slot holds symbol index + 1 */
+    m->hash = calloc(cap, sizeof *m->hash);
     if (!m->hash)
         return -1;
     m->hash_mask = cap - 1;
     for (uint32_t i = 0; i < m->nsyms; i++) {
         uint8_t type = nlist(m, i)[4];
-        if ((type & 0x0F) != 0x0F)              /* N_SECT | N_EXT */
+        if ((type & 0x0F) != 0x0F)
             continue;
         const char *name = sym_name(m, i);
         uint32_t h = name_hash(name) & m->hash_mask;
         while (m->hash[h]) {
             if (!strcmp(sym_name(m, m->hash[h] - 1), name))
-                break;                          /* keep the first definition */
+                break;
             h = (h + 1) & m->hash_mask;
         }
         if (!m->hash[h])
@@ -161,7 +159,6 @@ int macho_parse(macho *m, const uint8_t *data, uint32_t size, char *err, size_t 
                     FAIL("section %s,%s lies outside its segment", t->segname, t->name);
             }
         } else if (cmd == LC_UNIXTHREAD) {
-            /* flavor, count, arm_thread_state: r0..r12 sp lr pc cpsr */
             if (csize < 16 + 17 * 4)
                 FAIL("LC_UNIXTHREAD truncated");
             m->entry = rd32(p + 16 + 15 * 4);
@@ -172,8 +169,6 @@ int macho_parse(macho *m, const uint8_t *data, uint32_t size, char *err, size_t 
             m->weak_size = rd32(p + 28);
             m->lazy_off = rd32(p + 32);
             m->lazy_size = rd32(p + 36);
-            /* Rebase info only matters when an image slides; this host always maps the image at
-               its own addresses (layout.h), so it is ignored. */
             m->rebase_size = rd32(p + 12);
             have_dyld = 1;
         } else if (cmd == LC_SYMTAB) {
@@ -217,8 +212,6 @@ const macho_sect *macho_sect_named(const macho *m, const char *seg, const char *
             return &m->sects[i];
     return NULL;
 }
-
-/* dyld bind opcode streams */
 
 static int uleb(const uint8_t **p, const uint8_t *end, uint32_t *out)
 {
@@ -275,22 +268,22 @@ int macho_binds(const macho *m, int which, macho_bind_cb cb, void *ctx, char *er
     while (p < end) {
         uint8_t b = *p++, op = b & 0xF0, imm = b & 0x0F;
         switch (op) {
-        case 0x00:                              /* DONE: lazy streams are a list of runs */
+        case 0x00:
             if (which != BIND_LAZY)
                 return 0;
             break;
-        case 0x10:                              /* SET_DYLIB_ORDINAL_IMM */
+        case 0x10:
             ordinal = imm;
             break;
-        case 0x20:                              /* SET_DYLIB_ORDINAL_ULEB */
+        case 0x20:
             if (uleb(&p, end, &v))
                 FAIL("truncated ordinal");
             ordinal = (int)v;
             break;
-        case 0x30:                              /* SET_DYLIB_SPECIAL_IMM */
+        case 0x30:
             ordinal = imm ? (int)(int8_t)(0xF0 | imm) : 0;
             break;
-        case 0x40: {                            /* SET_SYMBOL_TRAILING_FLAGS_IMM */
+        case 0x40: {
             const uint8_t *z = memchr(p, 0, end - p);
             if (!z)
                 FAIL("unterminated symbol name");
@@ -302,40 +295,40 @@ int macho_binds(const macho *m, int which, macho_bind_cb cb, void *ctx, char *er
                     return 0;
             break;
         }
-        case 0x50:                              /* SET_TYPE_IMM */
+        case 0x50:
             if (imm != 1)
                 FAIL("bind type %u (only plain pointers are supported)", imm);
             break;
-        case 0x60:                              /* SET_ADDEND_SLEB */
+        case 0x60:
             if (sleb(&p, end, &addend))
                 FAIL("truncated addend");
             break;
-        case 0x70:                              /* SET_SEGMENT_AND_OFFSET_ULEB */
+        case 0x70:
             if (imm >= m->nsegs || uleb(&p, end, &v))
                 FAIL("bad segment/offset");
             addr = m->segs[imm].vmaddr + v;
             have_addr = 1;
             break;
-        case 0x80:                              /* ADD_ADDR_ULEB */
+        case 0x80:
             if (uleb(&p, end, &v))
                 FAIL("truncated address delta");
             addr += v;
             break;
-        case 0x90:                              /* DO_BIND */
+        case 0x90:
             DO_BIND();
             addr += 4;
             break;
-        case 0xA0:                              /* DO_BIND_ADD_ADDR_ULEB */
+        case 0xA0:
             DO_BIND();
             if (uleb(&p, end, &v))
                 FAIL("truncated address delta");
             addr += 4 + v;
             break;
-        case 0xB0:                              /* DO_BIND_ADD_ADDR_IMM_SCALED */
+        case 0xB0:
             DO_BIND();
             addr += 4 + imm * 4u;
             break;
-        case 0xC0:                              /* DO_BIND_ULEB_TIMES_SKIPPING_ULEB */
+        case 0xC0:
             if (uleb(&p, end, &count) || uleb(&p, end, &skip))
                 FAIL("truncated repeat");
             for (uint32_t i = 0; i < count; i++) {

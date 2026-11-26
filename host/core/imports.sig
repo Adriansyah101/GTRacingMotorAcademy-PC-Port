@@ -1,9 +1,4 @@
-﻿# Signatures of the game's imports (recomp/bridgegen.py reads this; see its docstring).
-#   name   ret  args  [C|raw]  [=crt]
-# Imports with no line here are stubs that stop the game with the name when reached.
-
-# process (imp_libc.c)
-exit                    v  i      C
+﻿exit                    v  i      C
 abort                   v  -      C
 __assert_rtn            v  iiii
 getenv                  i  i
@@ -25,7 +20,6 @@ sched_yield             i  -      =h_sched_yield
 sched_get_priority_min  i  i      =h_zero1
 sched_get_priority_max  i  i      =h_zero1
 
-# memory
 malloc                  i  i      =malloc
 calloc                  i  ii     =calloc
 realloc                 i  ii     =realloc
@@ -41,7 +35,6 @@ __memset_chk            i  iiii
 memset_pattern16        v  iii
 bzero                   v  ii
 
-# strings
 strlen                  i  i      =strlen
 strcmp                  i  ii     =strcmp
 strncmp                 i  iii    =strncmp
@@ -76,7 +69,6 @@ __maskrune              i  ii
 __tolower               i  i
 __toupper               i  i
 
-# random, sorting
 rand                    i  -
 srand                   v  i
 random                  i  -
@@ -85,7 +77,6 @@ srandomdev              v  -
 arc4random              i  -
 qsort                   v  iiii   C
 
-# stdio
 printf                  i  i+
 vprintf                 i  ii
 fprintf                 i  ii+
@@ -119,7 +110,6 @@ fileno                  i  i      =_fileno
 setvbuf                 i  iiii
 remove                  i  i
 
-# files
 open                    i  ii+
 close                   i  i
 read                    i  iii
@@ -135,7 +125,6 @@ chdir                   i  i
 utimes                  i  ii
 setxattr                i  iiiiii
 
-# time
 time                    i  i
 gettimeofday            i  ii
 localtime               i  i
@@ -146,7 +135,6 @@ mach_timebase_info      i  i
 mach_thread_self        i  -
 CFAbsoluteTimeGetCurrent d -
 
-# compiler helpers, atomics
 __divsi3                i  ii
 __modsi3                i  ii
 __udivsi3               i  ii
@@ -161,7 +149,6 @@ __floatundidf           d  l
 __floatundisf           f  l
 OSAtomicAdd32           i  ii
 
-# math
 acos                    d  d      =acos
 asin                    d  d      =asin
 atan                    d  d      =atan
@@ -194,7 +181,6 @@ roundf                  f  f      =roundf
 lrintf                  i  f
 modff                   f  fi
 
-# Objective-C runtime (objc.c)
 objc_msgSend            raw
 objc_msgSend_stret      raw
 objc_msgSendSuper2      raw
@@ -225,7 +211,6 @@ objc_copyStruct         v  iiiii
 objc_enumerationMutation v i
 objc_getClassList       i  ii
 
-# Foundation C functions (ns_string.c, ns_coll.c, ns_misc.c)
 NSLog                   v  i+
 NSLogv                  v  ii
 NSSearchPathForDirectoriesInDomains i iii
@@ -239,7 +224,6 @@ NSStringFromCGSize      i  ii
 NSSetUncaughtExceptionHandler v i
 NSAllocateObject        i  iii
 
-# CoreFoundation
 CFRelease               v  i
 CFAllocatorGetDefault   i  -
 CFStringCreateWithCString i iii
@@ -276,7 +260,6 @@ CFRunLoopGetCurrent     i  -
 CFRunLoopGetMain        i  -
 CFRunLoopRunInMode      i  ili
 
-# libstdc++: std::string (imp_cxx.c)
 _ZNSsC1Ev               i  i
 _ZNSsC1EPKcRKSaIcE      i  iii
 _ZNSsC1EPKcmRKSaIcE     i  iiii
@@ -341,7 +324,6 @@ _ZNSaIcED2Ev            v  i      =h_alloc_noop
 _ZNSaIcEC1ERKS_         v  i      =h_alloc_noop
 _ZNSaIcEC2ERKS_         v  i      =h_alloc_noop
 
-# libstdc++: containers, ABI support
 _ZSt18_Rb_tree_incrementPSt18_Rb_tree_node_base  i i
 _ZSt18_Rb_tree_incrementPKSt18_Rb_tree_node_base i i =h_ZSt18_Rb_tree_incrementPSt18_Rb_tree_node_base
 _ZSt18_Rb_tree_decrementPSt18_Rb_tree_node_base  i i
@@ -364,7 +346,6 @@ _ZSt9terminatev         v  -      C
 _ZNSt8ios_base4InitC1Ev v  i
 _ZNSt8ios_base4InitD1Ev v  i      =h_ZNSt8ios_base4InitC1Ev
 
-# pthreads (imp_pthread.c)
 pthread_mutex_init      i  ii
 pthread_mutex_destroy   i  i
 pthread_mutex_lock      i  i
@@ -397,7 +378,6 @@ pthread_kill            i  ii
 pthread_getschedparam   i  iii
 pthread_setschedparam   i  iii
 
-# exceptions (imp_unwind.c)
 _Unwind_SjLj_Register   v  i      C
 _Unwind_SjLj_Unregister v  i      C
 _Unwind_SjLj_Resume     v  i      C
@@ -422,16 +402,13 @@ _ZNSt13runtime_errorD2Ev v i
 _ZNSt13runtime_errorD1Ev v i      =h_ZNSt13runtime_errorD2Ev
 _ZNKSt13runtime_error4whatEv i i
 
-# longjmp (rt_core.c; setjmp call sites are compiled as GUEST_SETJMP)
 longjmp                 raw
 siglongjmp              raw
 
-# Blocks, dispatch (blocks.c)
 _Block_object_assign    v  iii
 _Block_object_dispose   v  ii
 dispatch_async          v  ii
 
-# iostreams (imp_stream.c)
 _ZNSt14basic_ifstreamIcSt11char_traitsIcEEC1EPKcSt13_Ios_Openmode i iii
 _ZNSt14basic_ifstreamIcSt11char_traitsIcEED1Ev i i
 _ZNSt14basic_ifstreamIcSt11char_traitsIcEE5closeEv v i
@@ -466,13 +443,11 @@ _ZNSi5seekgExSt12_Ios_Seekdir i ili
 _ZNSi5tellgEv           v  ii
 _ZNSt9basic_iosIcSt11char_traitsIcEE5clearESt12_Ios_Iostate v ii
 
-# UIKit, the device (uikit.c)
 UIApplicationMain       i  iiii
 sysctlbyname            i  iiiii
 sysctl                  i  iiiiii
 uname                   i  i
 
-# CoreGraphics, UIGraphics (cg.c; structs returned by value come through a first pointer argument)
 CGRectGetMinX           f  R
 CGRectGetMinY           f  R
 CGRectGetMaxX           f  R
@@ -544,7 +519,6 @@ UIGraphicsGetImageFromCurrentImageContext i -
 UIImageWriteToSavedPhotosAlbum v iiii
 UIGraphicsEndImageContext v -
 
-# CoreFoundation, the rest (cf.c)
 CFBundleGetMainBundle   i  -
 CFBundleGetIdentifier   i  i
 CFBundleGetInfoDictionary i i
@@ -568,14 +542,12 @@ CFBitVectorSetBitAtIndex v iii
 CFNotificationCenterGetLocalCenter i -
 CFNotificationCenterAddObserver v iiiiii
 
-# dyld (dyld.c)
 dladdr                  i  ii
 dlsym                   i  ii
 _dyld_image_count       i  -
 _dyld_get_image_name    i  i
 _dyld_get_image_header  i  i
 
-# Security: keychain, certificates (sec.c)
 SecItemAdd              i  ii
 SecItemCopyMatching     i  ii
 SecItemUpdate           i  ii
@@ -589,7 +561,6 @@ SecKeyGetBlockSize      i  i
 SecKeyEncrypt           i  iiiiii
 SecKeyDecrypt           i  iiiiii
 
-# CommonCrypto (crypto.c)
 CC_MD5                  i  iii
 CC_SHA1                 i  iii
 CC_SHA1_Init            i  i
@@ -599,7 +570,6 @@ CC_SHA256               i  iii
 CCHmac                  v  iiiiii
 CCCrypt                 raw
 
-# the network: none (net.c)
 socket                  i  iii
 connect                 i  iii
 bind                    i  iii
@@ -633,7 +603,6 @@ SCNetworkReachabilitySetCallback i iii
 SCNetworkReachabilityScheduleWithRunLoop i iii
 SCNetworkReachabilityUnscheduleFromRunLoop i iii
 
-# OpenGL ES (gles.c; straight ones from gl_list.h)
 glActiveTexture         v  i
 glAlphaFunc             v  if
 glAttachShader          v  ii
@@ -768,7 +737,6 @@ glVertexPointer         v  iiii
 glViewport              v  iiii
 glWeightPointerOES      v  iiii
 
-# OpenAL, AudioSession (al.c)
 alcOpenDevice           i  i
 alcCloseDevice          i  i
 alcCreateContext        i  ii

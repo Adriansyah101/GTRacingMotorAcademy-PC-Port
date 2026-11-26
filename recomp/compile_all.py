@@ -1,7 +1,3 @@
-"""Compile the generated C in parallel (checks it builds; objects for linking).
-
-Usage: python -I compile_all.py <gen_dir> <obj_dir> <x86_64|i686> [extra clang flags...]
-"""
 import glob
 import os
 import subprocess
@@ -16,7 +12,10 @@ FLAGS = ['-O2', '-c', '-fno-strict-aliasing', '-ffp-contract=off', '-fwrapv',
          '-Wall', '-Wno-unused-label', '-Wno-unused-variable', '-Wno-unused-but-set-variable',
          '-Wno-self-assign', '-Wno-unused-function']
 ARCH = {'x86_64': ['--target=x86_64-w64-mingw32'],
-        'i686': ['--target=i686-w64-mingw32', '-msse2', '-mfpmath=sse']}
+        'i686': ['--target=i686-w64-mingw32', '-msse2', '-mfpmath=sse'],
+        'i686-linux': ['-m32', '-msse2', '-mfpmath=sse', '-malign-double', '-fno-pie', '--param=min-pagesize=0',
+                       '-fno-delete-null-pointer-checks']}
+CLANG_ONLY = ('-Wno-self-assign',)
 
 
 def main():
@@ -30,8 +29,11 @@ def main():
     def one(src):
         out = os.path.join(obj, os.path.basename(src)[:-2] + '.o')
         t = time.time()
-        p = subprocess.run(['clang'] + ARCH[arch] + FLAGS + extra + ['-I', RUNTIME, '-I', gen, src, '-o', out],
-                           capture_output=True, text=True)
+        if arch.endswith('-linux'):
+            cmd = [os.environ.get('CC', 'gcc')] + ARCH[arch] + [f for f in FLAGS if f not in CLANG_ONLY]
+        else:
+            cmd = ['clang'] + ARCH[arch] + FLAGS
+        p = subprocess.run(cmd + extra + ['-I', RUNTIME, '-I', gen, src, '-o', out], capture_output=True, text=True)
         return src, p.returncode, p.stderr, time.time() - t
 
     t0 = time.time()

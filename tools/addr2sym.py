@@ -1,11 +1,3 @@
-"""Name the host function at an address of gtracing.exe (from the build's gtracing.map).
-
-Usage: python -I tools/addr2sym.py [--map FILE] 0xf54646 [more addresses]
-  --map FILE  the map of the exe the addresses come from: build/host/release/gtracing.map for the release build,
-              or a release's <out>/symbols/<folder>.map (tools/package_release.py).  Default: the development
-              build's build/host/gtracing.map.
-Recompiled game functions are F_<guest address>; host functions keep their C names.
-"""
 import bisect
 import os
 import re

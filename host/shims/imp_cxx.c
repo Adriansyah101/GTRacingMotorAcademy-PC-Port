@@ -1,18 +1,7 @@
-/* imp_cxx.c -- libstdc++ (GCC 4.2, the one iOS 4 shipped) and the C++ ABI support the game
-   imports: std::string, the red-black tree and list helpers, operator new/delete, guards.
-
-   std::string is the copy-on-write string: one pointer _M_p to the characters, with a header in
-   front of them,  struct _Rep { size_t length, capacity; int refcount; }  (12 bytes).  refcount 0 =
-   one owner, > 0 shared, -1 "leaked" (someone holds a pointer into it: copies must clone).  The
-   empty string is one static _Rep that is never freed.  The game inlines much of basic_string
-   (size(), c_str(), _M_dispose's test...), so the layout and conventions are libstdc++'s exactly.
-   A 32-bit host: guest pointers are host pointers, so this file uses plain C pointers.
-
-   Functions returning a std::string by value get the result's address first (sret in r0). */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "abi.h"
 #include "rt.h"
@@ -33,11 +22,9 @@ typedef struct { char *p; } string;
 static Rep *rep_of(const string *s) { return REP(s->p); }
 static size_type len_of(const string *s) { return rep_of(s)->length; }
 
-/* std::length_error / std::out_of_range: the game never catches these; stop with the reason. */
 __attribute__((noreturn)) static void gt_cxx_throw_length(const char *what) { rt_fatal("std::length_error: %s", what); }
 __attribute__((noreturn)) static void gt_cxx_throw_range(const char *what) { rt_fatal("std::out_of_range: %s", what); }
 
-/* _Rep::_S_create, with libstdc++'s growth policy */
 static Rep *rep_create(size_type cap, size_type old_cap)
 {
     if (cap > MAX_SIZE)
@@ -105,7 +92,6 @@ static char *construct(const char *s, size_type n)
     return DATA(r);
 }
 
-/* _M_mutate(pos, len1, len2): make room for len2 chars in place of len1 at pos, unshared. */
 static void mutate(string *s, size_type pos, size_type len1, size_type len2)
 {
     Rep *r = rep_of(s);
@@ -146,7 +132,6 @@ static size_type limit(const string *s, size_type pos, size_type n)
     return n < left ? n : left;
 }
 
-/* replace [pos, pos+n1) by s[0..n2) (s may point into the string itself) */
 static string *replace_raw(string *self, size_type pos, size_type n1, const char *src, size_type n2)
 {
     if (len_of(self) - n1 > MAX_SIZE - n2)
@@ -163,8 +148,6 @@ static string *replace_raw(string *self, size_type pos, size_type n1, const char
     free(tmp);
     return self;
 }
-
-/* constructors, destructor, assignment */
 
 string *h_ZNSsC1Ev(string *self) { self->p = DATA(&empty_rep.rep); return self; }
 string *h_ZNSsC1EPKcRKSaIcE(string *self, const char *s, void *a)
@@ -203,8 +186,6 @@ string *h_ZNSs6assignERKSsmm(string *self, const string *o, size_type pos, size_
     return h_ZNSs6assignEPKcm(self, o->p + pos, limit(o, pos, n));
 }
 
-/* access */
-
 const char *h_ZNKSs5c_strEv(const string *self) { return self->p; }
 size_type h_ZNKSs4sizeEv(const string *self) { return len_of(self); }
 u32 h_ZNKSs5emptyEv(const string *self) { return len_of(self) == 0; }
@@ -224,8 +205,6 @@ char *h_ZNSs3endEv(string *self) { leak(self); return self->p + len_of(self); }
 char *h_ZNKSs9_M_ibeginEv(const string *self) { return self->p; }
 char *h_ZNKSs7_M_iendEv(const string *self) { return self->p + len_of(self); }
 
-/* internals the inlined code calls */
-
 Rep *h_ZNSs12_S_empty_repEv(void) { return &empty_rep.rep; }
 string *h_ZNSs12_Alloc_hiderC1EPcRKSaIcE(string *self, char *p, void *a) { (void)a; self->p = p; return self; }
 void h_ZNSs13_S_copy_charsEPcPKcS1_(char *p, const char *k1, const char *k2) { memcpy(p, k1, (size_t)(k2 - k1)); }
@@ -237,8 +216,6 @@ void h_ZNSs4_Rep10_M_destroyERKSaIcE(Rep *r, void *a) { (void)a; if (r != &empty
 char *h_ZNSs4_Rep10_M_refdataEv(Rep *r) { return DATA(r); }
 void h_ZNSs4_Rep26_M_set_length_and_sharableEm(Rep *r, size_type n) { rep_set_length(r, n); }
 Rep *h_ZNSs4_Rep9_S_createEmmRKSaIcE(size_type cap, size_type old, void *a) { (void)a; return rep_create(cap, old); }
-
-/* modifiers */
 
 void h_ZNSs5clearEv(string *self) { mutate(self, 0, len_of(self), 0); }
 void h_ZNSs7reserveEm(string *self, size_type n)
@@ -304,7 +281,7 @@ char *h_ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_(string *self, char *
 {
     size_type pos = (size_type)(first - self->p);
     mutate(self, pos, (size_type)(last - first), 0);
-    rep_of(self)->refcount = -1;           /* returns an iterator: leaked, as libstdc++ does */
+    rep_of(self)->refcount = -1;
     return self->p + pos;
 }
 string *h_ZNSs7replaceEmmPKc(string *self, size_type pos, size_type n, const char *s)
@@ -322,8 +299,6 @@ string *h_ZNSs7replaceEN9__gnu_cxx17__normal_iteratorIPcSsEES2_PKcS4_(string *se
 {
     return replace_raw(self, (size_type)(i1 - self->p), (size_type)(i2 - i1), k1, (size_type)(k2 - k1));
 }
-
-/* search and compare */
 
 static size_type find_n(const string *self, const char *s, size_type pos, size_type n)
 {
@@ -392,15 +367,10 @@ void h_ZNKSs6substrEmm(string *out, const string *self, size_type pos, size_type
     out->p = construct(self->p + pos, limit(self, pos, n));
 }
 
-/* For other host code: a new std::string value in *out. */
 void gt_string_make(u32 out, const char *s, u32 n) { ((string *)GP(out))->p = construct(s, n); }
 const char *gt_string_cstr(u32 str) { return ((string *)GP(str))->p; }
 
-/* std::allocator<char>: stateless */
-
 void h_alloc_noop(void *self) { (void)self; }
-
-/* operator new / delete */
 
 void *h_Znwm(size_type n)
 {
@@ -411,13 +381,8 @@ void *h_Znwm(size_type n)
 }
 void h_ZdlPv(void *p) { free(p); }
 
-/* C++ ABI support */
-
-/* The game never exits normally (an iOS app is killed): destructors at exit are not run. */
 u32 h_cxa_atexit(u32 fn, u32 arg, u32 dso) { (void)fn; (void)arg; (void)dso; return 0; }
 
-/* Guards of function-local statics: byte 0 = done (the inlined fast path tests it), byte 1 = busy.
-   A second thread waits for the first, as on iOS. */
 static SRWLOCK guard_lock = SRWLOCK_INIT;
 static CONDITION_VARIABLE guard_cv = CONDITION_VARIABLE_INIT;
 u32 h_cxa_guard_acquire(volatile u8 *g)
@@ -451,11 +416,7 @@ void h_cxa_guard_abort(volatile u8 *g)
 void h_cxa_pure_virtual(CPU *c) { rt_fatal("pure virtual function called (return address 0x%08x)", c->r[14]); }
 void h_ZSt9terminatev(CPU *c) { rt_fatal("std::terminate (return address 0x%08x)", c->r[14]); }
 
-/* Each translation unit with <iostream> has a static ios_base::Init: nothing to set up here (the
-   standard streams the game uses are made on demand). */
 void h_ZNSt8ios_base4InitC1Ev(void *self) { (void)self; }
-
-/* red-black tree (libstdc++ 4.2 tree.cc; node = color, parent, left, right) */
 
 enum { RB_RED, RB_BLACK };
 typedef struct rbnode { u32 color; struct rbnode *parent, *left, *right; } rbnode;
@@ -723,8 +684,6 @@ rbnode *h_ZSt28_Rb_tree_rebalance_for_erasePSt18_Rb_tree_node_baseRS_(rbnode *z,
     }
     return y;
 }
-
-/* std::list node base (libstdc++ 4.2 list.cc; node = next, prev) */
 
 typedef struct lnode { struct lnode *next, *prev; } lnode;
 

@@ -1,32 +1,8 @@
-/* racelook.c -- RACE_LOOK (port addition): a 360-degree look around the car while racing, with the pad's right
-   stick or the numpad; released, the view goes straight back ahead.  The race's chase views only, as the replay
-   turns only its chase view.
-
-   The original has no free look while racing: only the look-back (HUD.btnRearView, the V key, steer.c
-   REAR_VIEW) and, in a replay, the swipe that turns the orbit views.  Both end in the same place of the
-   race camera ([race+0x10a8], update 0x19ca5c): the chase views 4 .. 6 (and the replay's 7) are made by
-   0x19bf38, which takes the camera's heading in s20, adds the look-back's half turn
-   (+0x28c blend x pi x +0x290 side, 0x19c34c ..) or, in a replay, the swipe's yaw (race+0xac0), and at
-   0x19c384 turns its (0, 0, -1) by that heading (0x14d514) for the line from the car to the eye; the eye
-   (+0x1e0) is the car (+0x3f8) less that line x the distance, shortened where a wall is in the way
-   (0x1559c4), and the target (+0x1f8) is ahead along it.  The in-car views 1 .. 3 (0x19ab38, 0x19a8a0,
-   0x19a658) are left alone.
-   Here (recomp/codegen.py HOST_INSNS 0x19c384, gt_race_look) the look's angle is added to s20 there, so the
-   game places the eye around the car itself, walls included.  The look goes:
-     pad:  the right stick's direction (past 35 % of its travel): up ahead, right to the car's right, down
-           behind, and between; let go, the view is ahead again;
-     keys: the numpad, held: 8 ahead, 9 front right, 6 right, 3 rear right, 2 behind, 1 rear left, 4 left,
-           7 front left (two held: between them); NumLock on or off (scancodes).
-   It eases over GT_RACE_LOOK_SMOOTH ms (default 60; 0: at once), the short way round, and only while a
-   race is driven (state 2 .. 8, not a replay: G+0x4179 0) in the chase views.  The right stick is left
-   out when KEY_MAP gives one of its halves to a driving action.
-   GT_RACE_LOOK=0 leaves the camera as it was.  Testing: GT_RACE_LOOKTEST=from:to:digits;... holds those
-   numpad digits on those frames. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "features.h"
 #include "game.h"
@@ -38,12 +14,11 @@ int keymap_right_stick_bound(void);
 
 static int opt = -1;
 static float smooth_s;
-static float target;                    /* the look's angle now asked (radians, + = to the car's right) */
-static int asked;                       /* a direction is held */
-static float shown;                     /* the angle given to the camera */
+static float target;
+static int asked;
+static float shown;
 static LARGE_INTEGER t_last;
 
-/* GT_RACE_LOOKTEST: the numpad digits held on this frame */
 static const char *look_test(void)
 {
     static const char *env;
@@ -62,7 +37,6 @@ static const char *look_test(void)
     return keys;
 }
 
-/* the numpad's digits held (and GT_RACE_LOOKTEST's): x to the right, y ahead; 0 = none (or opposite ones) */
 int numpad_dir(float *x, float *y)
 {
     static const signed char dir[10][2] = {
@@ -80,12 +54,11 @@ int numpad_dir(float *x, float *y)
     return kx != 0 || ky != 0;
 }
 
-/* once a frame from ui_pump: the right stick (0 when the pad is busy or absent) */
 void race_look_input(float rx, float ry)
 {
     if (opt < 0) {
         opt = !(getenv("GT_RACE_LOOK") && *getenv("GT_RACE_LOOK") == '0');
-        smooth_s = rt_setting_float("GT_RACE_LOOK_SMOOTH", 60, 0, 2000) / 1000.0f;   /* ms; 0 = no easing */
+        smooth_s = rt_setting_float("GT_RACE_LOOK_SMOOTH", 60, 0, 2000) / 1000.0f;
         rt_log("[look] race chase views: right stick / numpad look around %s (eased %.0f ms)\n",
                opt ? "on" : "off (GT_RACE_LOOK=0)", smooth_s * 1000);
     }
@@ -106,13 +79,12 @@ void race_look_input(float rx, float ry)
     }
 }
 
-/* from the generated 0x19bf38 (codegen HOST_INSNS 0x19c384): the angle added to the chase camera's heading */
 float gt_race_look(u32 cam)
 {
     u32 g = gt_game(), race = g ? rd32(g + G_RACE) : 0;
     int view = (int)rd32(cam + 0x23c);
     if (!race || rd32(race + 0x10a8) != cam)
-        return 0;                       /* another camera: the look's state stays */
+        return 0;
     LARGE_INTEGER t, f;
     QueryPerformanceCounter(&t);
     QueryPerformanceFrequency(&f);
@@ -145,6 +117,5 @@ float gt_race_look(u32 cam)
         }
     }
     was = asked;
-    /* the game's heading turns the other way: + is to the car's left */
     return -shown;
 }

@@ -1,18 +1,8 @@
-/* eagl.c -- EAGLContext on SDL's OpenGL contexts, and the game's picture on the PC window.
-
-   On iOS the game renders into a framebuffer object whose colour renderbuffer gets its storage from
-   the CAEAGLLayer (renderbufferStorage:fromDrawable:), and presentRenderbuffer: hands it to Core
-   Animation, which composites the layer with its views' transforms onto the portrait screen.  Here
-   that renderbuffer is copied into a texture and drawn to the window the same way: through the
-   view's transform to the screen, then turned to the landscape the player sees, letterboxed.
-
-   Testing: GT_SHOTS=120,600 saves the window at those presented frames (build\host\shots\);
-   GT_QUIT_AT=n closes the application after n frames; GT_VSYNC=0 turns vsync off. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "gl.h"
 #include "game_hooks.h"
@@ -22,7 +12,7 @@
 typedef struct { u32 isa, api, sharegroup, multi; SDL_GLContext gl; u32 src_fbo, dst_fbo, tex; int tw, th; } Ctx;
 #define CX(o) ((Ctx *)GP(o))
 
-static __thread u32 cur;                  /* this thread's current EAGLContext */
+static __thread u32 cur;
 static SDL_GLContext first_gl;
 static u32 drawable_rb, drawable_layer;
 static int rb_w, rb_h;
@@ -66,6 +56,22 @@ static id init_api(id self, u32 api, u32 share)
 }
 static void c_initWithAPI(CPU *c) { ret_i(c, init_api(SELF, ARG(0), 0)); }
 static void c_initWithAPIShare(CPU *c) { ret_i(c, init_api(SELF, ARG(0), ARG(1))); }
+#ifndef _WIN32
+static int egl_surfaceless(SDL_GLContext gl)
+{
+    typedef unsigned (*T_make)(void *, void *, void *, void *);
+    static T_make make;
+    void *dpy = SDL_EGL_GetCurrentDisplay();
+    if (!dpy)
+        return 0;
+    if (!make)
+        make = (T_make)SDL_EGL_GetProcAddress("eglMakeCurrent");
+    if (!make)
+        return 0;
+    SDL_GL_MakeCurrent(NULL, gl);
+    return make(dpy, NULL, NULL, gl) != 0;
+}
+#endif
 static void c_setCurrent(CPU *c)
 {
     id ctx = ARG(0), old = cur;
@@ -74,8 +80,17 @@ static void c_setCurrent(CPU *c)
         objc_release(old);
     }
     int ok = SDL_GL_MakeCurrent(ui_window, ctx ? CX(ctx)->gl : NULL);
+#ifndef _WIN32
+    if (!ok && ctx && egl_surfaceless(CX(ctx)->gl)) {
+        ok = 1;
+        static int said;
+        if (!said++)
+            rt_log("[eagl] thread %lu: context 0x%08x made current without the window's surface (EGL)\n",
+                   GetCurrentThreadId(), ctx);
+    }
+#endif
     if (ok)
-        gles_context_current(ctx ? CX(ctx)->gl : NULL);    /* the vertex state shadow follows the context */
+        gles_context_current(ctx ? CX(ctx)->gl : NULL);
     if (!ok || rt_trace)
         rt_log("[eagl] thread %lu: current context 0x%08x%s%s\n", GetCurrentThreadId(), ctx, ok ? "" : " FAILED: ",
                ok ? "" : SDL_GetError());
@@ -101,15 +116,10 @@ static void c_dealloc(CPU *c)
 
 static void c_storage(CPU *c)
 {
-    /* renderbufferStorage:(target)fromDrawable:(id<EAGLDrawable>) */
     id layer = ARG(1);
     float w = UI_SCREEN_W, h = UI_SCREEN_H, s = 1;
     if (layer)
         ui_layer_size(layer, &w, &h, &s);
-    /* rounded down, as the game sizes its own viewports from the layer (points x scale, the fraction dropped).
-       Rounded to nearest, a 1365-point-wide screen at scale 1.40625 (GT_WIDE=monitor, GT_RESOLUTION=monitor on a
-       1920 x 1080 monitor: 1919.53) got 1920 rows of which the game drew 1919; the last one, the picture's left
-       column, kept stale light pixels (port fault: a thin column of stale pixels at the picture's left edge). */
     int pw = (int)(w * s + 0.001f), ph = (int)(h * s + 0.001f);
     u32 rb = 0;
     p_glGetIntegerv(GL_RENDERBUFFER_BINDING, GA(&rb));
@@ -123,8 +133,6 @@ static void c_storage(CPU *c)
     ret_i(c, 1);
 }
 
-/* presenting */
-
 static void save_shot(int W, int H)
 {
     u8 *px = malloc((size_t)W * H * 4), *flip = malloc((size_t)W * H * 4);
@@ -135,7 +143,7 @@ static void save_shot(int W, int H)
     SDL_Surface *s = SDL_CreateSurfaceFrom(W, H, SDL_PIXELFORMAT_ABGR8888, flip, W * 4);
     char path[MAX_PATH + 32];
     CreateDirectoryA(shot_dir, NULL);
-    snprintf(path, sizeof path, "%s\\frame%05u.bmp", shot_dir, frames);
+    snprintf(path, sizeof path, "%s" GT_SEP "frame%05u.bmp", shot_dir, frames);
     if (s && SDL_SaveBMP(s, path))
         rt_log("[eagl] saved %s\n", path);
     SDL_DestroySurface(s);
@@ -143,12 +151,6 @@ static void save_shot(int W, int H)
     free(flip);
 }
 
-/* GT_BENCH=a-b,c-d (testing, for the optimisation passes' before / after reports): for each span of presented
-   frames a..b, one log line with its frame rate, the process's CPU
-   time and the main thread's, as a share of one core.  A test route reaches the same frames in the same places, so
-   two builds are measured on the same menus and the same race (at the 60 cap: the CPU each frame costs).
-   GT_BENCH_UNCAP=1 (with GT_VSYNC=0) lifts the cap inside the spans only: the frame rate the CPU allows there, while
-   the route around them keeps the 60 frames a second its frame numbers were planned at. */
 static int bench_open;
 static double ft_sec(FILETIME k, FILETIME u)
 {
@@ -184,7 +186,7 @@ static void bench_frame(void)
         main0 = ft_sec(k, u);
         const char *e = dev_getenv("GT_BENCH_UNCAP");
         bench_open = e && *e == '1';
-        dev_log("[bench] frames %u-%u: started\n", span[cur_span][0], span[cur_span][1]);   /* for an outside profiler */
+        dev_log("[bench] frames %u-%u: started\n", span[cur_span][0], span[cur_span][1]);
     } else if (frames == span[cur_span][1] && t0 > 0) {
         double dt = ns_now() - t0;
         GetProcessTimes(GetCurrentProcess(), &a, &b, &k, &u);
@@ -200,8 +202,6 @@ static void bench_frame(void)
     }
 }
 
-/* GT_GL_STATS=1 (testing, pass 4): the time present() spends in its state queries, its attribute push / pop and
-   the swap, every 600 frames (the queries make a threaded driver finish the frame's commands first) */
 static int pt_on = -1;
 static LARGE_INTEGER pt_freq;
 static double pt_acc[4];
@@ -226,8 +226,6 @@ static void present(Ctx *x)
         QueryPerformanceFrequency(&pt_freq);
     }
     double t0 = pt_on > 0 ? pt_now() : 0;
-    /* QUERY_FREE (gles.c, pass 4): the state kept, not asked of the driver (each query made it finish the frame's
-       commands first: 0.04-0.17 ms a frame) */
     gles_state(GL_CURRENT_PROGRAM, &prog);
     gles_state(GL_READ_FRAMEBUFFER_BINDING, &rfbo);
     gles_state(GL_DRAW_FRAMEBUFFER_BINDING, &dfbo);
@@ -235,7 +233,7 @@ static void present(Ctx *x)
     gles_state(GL_ACTIVE_TEXTURE, &active);
     gles_state(GL_ARRAY_BUFFER_BINDING, &abuf);
     gles_state(GL_ELEMENT_ARRAY_BUFFER_BINDING, &ebuf);
-    gles_state(GL_TEXTURE_BINDING_2D, &tex0);    /* unit 0's */
+    gles_state(GL_TEXTURE_BINDING_2D, &tex0);
     p_glActiveTexture(GL_TEXTURE0);
     pt_add(0, t0);
     t0 = pt_on > 0 ? pt_now() : 0;
@@ -246,7 +244,6 @@ static void present(Ctx *x)
     p_glDisable(GL_SCISSOR_TEST);
     p_glColorMask(1, 1, 1, 1);
 
-    /* the renderbuffer into a texture of this context */
     if (!x->src_fbo) {
         p_glGenFramebuffers(1, GA(&x->src_fbo));
         p_glGenFramebuffers(1, GA(&x->dst_fbo));
@@ -265,7 +262,7 @@ static void present(Ctx *x)
         x->tw = rb_w;
         x->th = rb_h;
     }
-    u32 ms = glx_present_fbo();           /* MSAA (glenhance.c): its samples resolved by the blit */
+    u32 ms = glx_present_fbo();
     if (ms)
         gles_bind_fb(GL_READ_FRAMEBUFFER, ms);
     else {
@@ -275,7 +272,6 @@ static void present(Ctx *x)
     gles_bind_fb(GL_DRAW_FRAMEBUFFER, x->dst_fbo);
     p_glBlitFramebuffer(0, 0, (u32)rb_w, (u32)rb_h, 0, 0, (u32)rb_w, (u32)rb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 
-    /* where the texture's corners are in the window: layer -> screen (portrait) -> landscape -> pixels */
     float lw = UI_SCREEN_W, lh = UI_SCREEN_H, ls = 1;
     GtAffine m = {1, 0, 0, 1, 0, 0};
     if (drawable_layer) {
@@ -288,8 +284,8 @@ static void present(Ctx *x)
     float vx[4], vy[4];
     static const float st[4][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
     for (int i = 0; i < 4; i++) {
-        float px = st[i][0] * lw, py = (1 - st[i][1]) * lh;                    /* layer points, y down */
-        float sx = m.a * px + m.c * py + m.tx, sy = m.b * px + m.d * py + m.ty;   /* screen, portrait */
+        float px = st[i][0] * lw, py = (1 - st[i][1]) * lh;
+        float sx = m.a * px + m.c * py + m.tx, sy = m.b * px + m.d * py + m.ty;
         float lx, ly;
         if (UI_ORIENTATION == 3)
             lx = sy, ly = UI_SCREEN_W - sx;
@@ -338,27 +334,21 @@ static void present(Ctx *x)
     for (int i = 0; i < nshots; i++)
         if (shots[i] == (int)frames)
             save_shot(W, H);
-    /* the iPad shows at most 60 frames a second; faster screens would run the game faster than that
-       (GT_FPS=n changes the cap, 0 = none) */
     static double next_t, period = -1;
     if (period < 0) {
-        int fps = rt_setting_int("GT_FPS", 60, 0, 1000);   /* 0: no cap */
+        int fps = rt_setting_int("GT_FPS", 60, 0, 1000);
         period = fps > 0 ? 1.0 / fps : 0;
     }
-    /* BACKGROUND_THROTTLE (uikit.c): behind other windows or minimized, a lower cap (also with GT_FPS=0) */
     int bg = ui_background_fps();
     double per = bg > 0 && (period <= 0 || period < 1.0 / bg) ? 1.0 / bg : period;
     if (GT_DEV && per > 0 && bench_open && !bg)
-        next_t = 0;                       /* GT_BENCH_UNCAP: no cap in the span, the next capped frame starts afresh */
+        next_t = 0;
     else if (per > 0) {
         double now = ns_now();
         if (next_t == 0 || next_t < now - per)
             next_t = now;
         next_t += per;
         if (ns_precise_wait_on()) {
-            /* PRECISE_WAIT (ns_misc.c): the timer is asked for 50 us before the deadline and only what is left
-               under 0.1 ms is spun (optimisation pass 4: waking 0.2 ms early and spinning up to 0.3 ms cost ~1.5 % of a
-               core at 60 fps, a good part of the render thread's own CPU at the cap). */
             for (double d; (d = next_t - ns_now()) > 0.0001;)
                 ns_wait(d - 0.00005);
         } else {
@@ -370,7 +360,7 @@ static void present(Ctx *x)
     }
     t0 = pt_on > 0 ? pt_now() : 0;
     if (ui_minimized())
-        p_glFlush();                      /* BACKGROUND_THROTTLE: nothing to show; the frame's work still goes out */
+        p_glFlush();
     else
         SDL_GL_SwapWindow(ui_window);
     pt_add(2, t0);
@@ -382,8 +372,6 @@ static void present(Ctx *x)
     p_glMatrixMode(GL_TEXTURE);
     p_glPopMatrix();
 
-    /* the game's framebuffers first: the attributes hold their draw/read buffers (COLOR_ATTACHMENT0),
-       which the default framebuffer would refuse */
     gles_bind_fb(GL_READ_FRAMEBUFFER, rfbo);
     gles_bind_fb(GL_DRAW_FRAMEBUFFER, dfbo);
     p_glPopClientAttrib();
@@ -402,16 +390,14 @@ static void present(Ctx *x)
         pt_frames = 0;
         memset(pt_acc, 0, sizeof pt_acc);
     }
-    glx_frame_end();                      /* DISPLAY_MENU: anti-aliasing / anisotropic changed in the menu */
-    gt_frame_end();                       /* the game's own end of frame work (display.c: Motion Blur) */
-    wide_frame_start();                   /* WIDE_UI: the side bands of a frame with only menus */
-    gles_state_forget();                  /* STATE_CACHE (gles.c): the host's own GL work above, never stale */
+    glx_frame_end();
+    gt_frame_end();
+    wide_frame_start();
+    gles_state_forget();
 
     if (frames == 1)
         rt_log("[eagl] first frame presented\n");
     bench_frame();
-    /* GT_SPIKE_MS=n (testing): one line for each frame that took longer than n ms from the last present to this
-       one, with its frame number, so a hitch (a menu opening, a load) can be placed against the log's other lines */
     static double spike_ms = -1, spike_t;
     if (spike_ms < 0) {
         const char *e = dev_getenv("GT_SPIKE_MS");
@@ -423,7 +409,7 @@ static void present(Ctx *x)
             rt_log("[spike] frame %u: %.1f ms\n", frames, (now - spike_t) * 1000);
         spike_t = now;
     }
-#define FPS_LOG_MS 10000                /* the frame rate is logged this often */
+#define FPS_LOG_MS 10000
     static u64 fps_t0;
     static u32 fps_f0;
     u64 now_ms = SDL_GetTicks();
@@ -435,7 +421,6 @@ static void present(Ctx *x)
         fps_t0 = now_ms;
         fps_f0 = frames;
     }
-    /* GT_WATCH=addr,off1,off2...: log the pointer chain's end when it changes (debugging) */
     static const char *watch;
     static u32 last_seen = 0xdeadbeef;
     if (!GT_DEV || !watch)
@@ -474,12 +459,12 @@ void eagl_init(void)
             s++;
     }
     if (dev_getenv("GT_QUIT_AT"))
-        quit_at = atoi(dev_getenv("GT_QUIT_AT"));
+        quit_at = rt_parse_int(dev_getenv("GT_QUIT_AT"), 0, 0, 0x7fffffff);
     GetModuleFileNameA(NULL, shot_dir, sizeof shot_dir);
-    char *e = strrchr(shot_dir, '\\');
+    char *e = strrchr(shot_dir, GT_SEPC);
     if (e)
-        strcpy(e, "\\shots");
-    if (dev_getenv("GT_SHOT_DIR") && *dev_getenv("GT_SHOT_DIR"))      /* testing: two runs at once */
+        strcpy(e, GT_SEP "shots");
+    if (dev_getenv("GT_SHOT_DIR") && *dev_getenv("GT_SHOT_DIR"))
         snprintf(shot_dir, sizeof shot_dir, "%s", dev_getenv("GT_SHOT_DIR"));
     static const NsMethod ctx[] = {
         {"initWithAPI:", c_initWithAPI, 0}, {"initWithAPI:sharegroup:", c_initWithAPIShare, 0},

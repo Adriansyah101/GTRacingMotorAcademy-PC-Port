@@ -1,8 +1,3 @@
-/* dyld.c -- the dynamic loader as the game asks it: dladdr, dlsym and the loaded image list.
-
-   One image is loaded, the game's own executable (an iPad without a jailbreak has no extra
-   libraries injected, which is what the game's checks look for); the system libraries' functions are
-   the host's import addresses. */
 #include <stdio.h>
 #include <string.h>
 
@@ -16,7 +11,6 @@ static const char *guest_exe(void)
     return exe_path;
 }
 
-/* dladdr(addr, Dl_info *{fname, fbase, sname, saddr}) */
 u32 h_dladdr(u32 addr, u32 info)
 {
     if (!info)
@@ -39,7 +33,6 @@ u32 h_dladdr(u32 addr, u32 info)
     return 0;
 }
 
-/* dlsym(handle, "name"): a function the host provides (the C name has no leading underscore) */
 u32 h_dlsym(u32 handle, u32 name)
 {
     (void)handle;

@@ -1,8 +1,3 @@
-/* dataimp.c -- data the game imports from the system libraries (rt_data_import, loader.c).
-
-   A data import's slot gets the address of the thing itself: a class_t, a struct constant, or a
-   variable cell (an NSString * const, a FILE *).  Names the host has nothing for are left to the
-   loader's guard page. */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,7 +11,6 @@
 u32 objc_data_import(const char *name);
 u32 cxx_data_import(const char *name);
 
-/* A constant NSString with the CFString constant layout {isa, flags, chars, length}. */
 static u32 gt_const_nsstring(const char *s)
 {
     u32 *o = calloc(4, 4);
@@ -35,8 +29,6 @@ static u32 cell(u32 v)
 }
 
 static u32 zeros(u32 bytes) { return GA(calloc(1, bytes)); }
-
-/* Darwin's ctype table (_DefaultRuneLocale), for the game's inline isalpha() & co */
 
 enum {
     CT_A = 0x100, CT_C = 0x200, CT_D = 0x400, CT_G = 0x800, CT_L = 0x1000, CT_P = 0x2000, CT_S = 0x4000,
@@ -82,8 +74,6 @@ static u32 make_rune_locale(void)
     }
     return GA(rune_locale);
 }
-
-/* the table */
 
 static const char *const string_prefixes[] = {"_NS", "_UI", "_MP", "_AD", "_k", NULL};
 
@@ -139,8 +129,6 @@ u32 rt_data_import(const char *name)
         return cell(objc_retain(ns_num_d(__builtin_nan(""))));
     if (!strcmp(name, "__dispatch_main_q"))
         return zeros(64);
-    /* NSString * const: the value is the name (a few have other values on iOS; the game only
-       compares and passes them back) */
     for (int i = 0; string_prefixes[i]; i++)
         if (!strncmp(name, string_prefixes[i], strlen(string_prefixes[i]))) {
             const char *s = name + 1;

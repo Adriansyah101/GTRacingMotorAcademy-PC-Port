@@ -1,17 +1,9 @@
-/* gles.c -- the game's OpenGL ES 1.1 / 2.0 calls on desktop OpenGL 2.1 (compatibility profile).
-
-   Most calls are the same function there (gl_list.h, passed straight through).  What differs:
-   - glGetString says what an iPad's PowerVR SGX says (the game picks its paths by it);
-   - GLSL ES shaders get a GLSL 1.20 header (precision qualifiers become nothing);
-   - the OES framebuffer names are the core ones, glClearDepthf is glClearDepth;
-   - PVRTC textures (glCompressedTexImage2D) are unpacked here to RGBA8;
-   - a few ES-only glGet values and texture/renderbuffer formats are answered or mapped. */
 #include <ctype.h>
 #include <emmintrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "gl.h"
 #include "game_hooks.h"
@@ -24,7 +16,6 @@
 #define GLX(ret, name, params) T_##name p_##name;
 #include "gl_list.h"
 
-/* pass-throughs: h_<name> as the import bridges call them */
 #define GLP(name, params, args) void h_##name params { p_##name args; }
 #define GLR(ret, name, params, args) ret h_##name params { return p_##name args; }
 #include "gl_list.h"
@@ -32,8 +23,7 @@
 static int loaded;
 static char gpu_vendor[128], gpu_renderer[128];
 
-/* GT_GLDEBUG=1: the driver's error messages (KHR_debug), the first 200 */
-#define GL_DEBUG_LOG_MAX 200            /* driver errors logged, then the rest are counted only */
+#define GL_DEBUG_LOG_MAX 200
 static void GT_GLAPI gl_debug_cb(u32 source, u32 type, u32 id, u32 severity, int len, const char *msg, const void *user)
 {
     (void)source, (void)id, (void)len, (void)user;
@@ -86,14 +76,12 @@ void gles_load(void)
     const char *v = (const char *)p_glGetString(GL_VENDOR), *r = (const char *)p_glGetString(GL_RENDERER);
     snprintf(gpu_vendor, sizeof gpu_vendor, "%s", v ? v : "");
     snprintf(gpu_renderer, sizeof gpu_renderer, "%s", r ? r : "");
-    gpu_profile_start();               /* GPU_PROFILE (gpuprofile.c): the kind of GPU, on a thread of its own */
+    gpu_profile_start();
 }
 
-/* the driver's own names (GPU_PROFILE, gpuprofile.c); the game is told an iPad's (h_glGetString) */
 const char *gles_gpu_vendor(void) { return gpu_vendor; }
 const char *gles_gpu_renderer(void) { return gpu_renderer; }
 
-/* each new context (current on this thread now) */
 void gles_context_created(void)
 {
     if (dev_getenv("GT_GLDEBUG"))
@@ -114,9 +102,7 @@ static void once(const char *what)
     }
 }
 
-/* strings and state */
-
-int gles_api = 2;                  /* the API of the last EAGLContext made (eagl.c) */
+int gles_api = 2;
 
 u32 h_glGetString(u32 name)
 {
@@ -179,7 +165,7 @@ void h_glGetIntegerv(u32 pname, u32 out)
         if (*v > 4096)
             *v = 4096;
         return;
-    case GL_FRAMEBUFFER_BINDING: { /* GL_FRAMEBUFFER_BINDING: the game's main framebuffer, not glenhance.c's stand-in */
+    case GL_FRAMEBUFFER_BINDING: {
         p_glGetIntegerv(pname, out);
         *v = (int)glx_logical_fbo((u32)*v);
         return;
@@ -197,45 +183,31 @@ void h_glCurrentPaletteMatrixOES(u32 m) { (void)m; once("OES_matrix_palette (glC
 void h_glMatrixIndexPointerOES(u32 a, u32 b, u32 c_, u32 d) { (void)a, (void)b, (void)c_, (void)d; once("OES_matrix_palette (glMatrixIndexPointerOES) is not supported"); }
 void h_glWeightPointerOES(u32 a, u32 b, u32 c_, u32 d) { (void)a, (void)b, (void)c_, (void)d; once("OES_matrix_palette (glWeightPointerOES) is not supported"); }
 
-/* vertex arrays
-   The generic attribute arrays are shadowed here (per thread = per context, each context stays on its thread) so
-   that a draw can:
-   - turn GL_FIXED (16.16) arrays in the game's memory into floats (desktop drivers take GL_FIXED only from
-     buffers; from client memory it is a driver path nobody tests);
-   - skip an enabled client array whose memory is gone (PowerVR never reads an array the program does not use;
-     a desktop driver may copy every enabled one, and a stale pointer then faults inside the driver);
-   - say what was bound when a draw faults (gles_fault_dump, from the fault handler). */
 #define MAX_ATTR 16
 typedef struct {
     u32 on, size, type, norm, stride, ptr, vbo;
-    float *conv;       /* GL_FIXED from client memory: floats for this attribute */
+    float *conv;
     u32 conv_n;
 } Attr;
 typedef struct {
     Attr a[MAX_ATTR];
     u32 array_buf, elem_buf;
     u32 draw_mode, draw_count, draw_type, draw_ptr, draws;
-    struct { u32 lo, hi; } ok[16];   /* memory known readable this frame (16, pass 3: a race's client arrays
-                                        lie in more than 4 regions, VirtualQuery was 1.3 % of its render thread) */
+    struct { u32 lo, hi; } ok[16];
     u32 ok_next, ok_frame;
-    u32 del_seen;                    /* del_gen when this thread last checked its buffer bindings */
-    u32 client;                      /* DRAW_FAST: bit i = attribute i enabled and read from client memory */
-    u32 bufarr;                      /* MIXED_KEEP: bit i = attribute i enabled and read from a buffer object */
-    /* STATE_CACHE (below): what this context has bound, SC_UNKNOWN when not known */
+    u32 del_seen;
+    u32 client;
+    u32 bufarr;
     u32 sc_unit, sc_tex[32], sc_prog, sc_bsrc, sc_bdst;
-    u32 sc_tex_gen, sc_prog_gen;     /* tex_del_gen / prog_del_gen when this context last looked */
-    u32 sc_caps_known, sc_caps_on;   /* glEnable / glDisable of the caps in cap_bit(), one bit each */
-    u32 sc_dmask, sc_cmask;          /* glDepthMask, glColorMask (4 bits) */
-    u32 sc_abuf_gen, sc_ebuf_gen;    /* buf_gen when array_buf / elem_buf were bound here, SC_UNKNOWN: not sure */
-    u32 sc_arr_known, sc_arr_on;     /* ARRAY_CACHE (pass 6): glEnable/DisableVertexAttribArray, one bit an array */
-    /* QUERY_FREE (below): this context's state as last set, kept for the host's own GL work; tk_known: bits TK_* */
+    u32 sc_tex_gen, sc_prog_gen;
+    u32 sc_caps_known, sc_caps_on;
+    u32 sc_dmask, sc_cmask;
+    u32 sc_abuf_gen, sc_ebuf_gen;
+    u32 sc_arr_known, sc_arr_on;
     u32 tk_known, tk_prog, tk_unit, tk_tex0, tk_rfb, tk_dfb, tk_rb, tk_scissor_on, tk_box[4];
     float tk_clear[4];
-    /* STREAM_VBO (below): this context's rings (vertices, indices), where the next copy goes in each, the context
-       they were made in, and the arrays now pointing into the ring instead of the game's memory */
     u32 sv_ring, sv_iring, sv_off, sv_ioff, sv_moved;
     void *sv_ctx;
-    /* STREAM_VBO's persistent rings (mapped once): their bytes, the quarter now written in each, a fence a quarter */
     unsigned char *sv_map[2];
     u32 sv_seg[2];
     void *sv_fence[2][4];
@@ -259,33 +231,17 @@ static VState *vstate_new(void)
         sc_forget(s);
     return s;
 }
-/* bumped by every glDeleteBuffers on any thread: the loader thread's shared context deletes buffers that the
-   main thread's attribute arrays still name (a crash back to the menu after a race: attribute 3 at
-   "buffer offset 0x18" read as memory 0x18 inside nvoglv32.dll).  PowerVR keeps the binding or ignores the
-   unused array; the NVIDIA driver drops it, so each thread rechecks its bindings with glIsBuffer. */
 static volatile LONG del_gen;
-/* a delete (with its del_gen bump) and a draw (from check_deleted to the driver's draw) never overlap: taken
-   shared by draws, exclusive by glDeleteBuffers (not by eagl.c's present: it waits for the frame and vsync,
-   and would hold the loader's deletes to one a frame).  Without it the loader thread could
-   delete a buffer after the main thread had checked its bindings and before it drew (or before del_gen moved),
-   and the draw read the dropped array at its offset as memory: a crash starting a race with the
-   Ferrari 288 GTO (attribute 3, stride 36, "buffer offset 0x18", read of 0x18 in nvoglv32.dll, on the loading
-   screen's quad).  A port fault (PowerVR keeps the binding); not reproduced here, the window is short. */
 static SRWLOCK del_lock = SRWLOCK_INIT;
 static void gles_draw_lock(void) { AcquireSRWLockShared(&del_lock); }
 static void gles_draw_unlock(void) { ReleaseSRWLockShared(&del_lock); }
-/* The shadow belongs to a GL context, as the state it mirrors does, not to a thread.  It was once per thread.
-   A thread that binds a buffer under one EAGLContext and then sets an attribute pointer under the
-   other (the game's main and shared loader contexts) recorded "buffer offset 0x18".  The context really had no
-   buffer bound, so that was a pointer to memory 0x18, and nothing was deleted, so no recheck ran.
-   eagl.c's setCurrentContext: switches this thread to the context's shadow (gles_context_current). */
 static __thread VState *vs_;
 static struct { void *gl; VState *s; } ctx_vs[16];
 static SRWLOCK ctx_lock = SRWLOCK_INIT;
 void gles_context_current(void *gl)
 {
     if (!gl)
-        return;                  /* no context: GL calls do nothing, the shadow waits for the next one */
+        return;
     VState *s = NULL;
     AcquireSRWLockExclusive(&ctx_lock);
     int i;
@@ -311,7 +267,7 @@ void gles_context_destroyed(void *gl)
     AcquireSRWLockExclusive(&ctx_lock);
     for (int i = 0; i < 16; i++)
         if (ctx_vs[i].gl == gl)
-            ctx_vs[i].gl = (void *)1;   /* the shadow is left (a thread may still point at it), the slot unused */
+            ctx_vs[i].gl = (void *)1;
     ReleaseSRWLockExclusive(&ctx_lock);
 }
 static VState *vs(void)
@@ -323,7 +279,6 @@ static VState *vs(void)
     return vs_;
 }
 
-/* DRAW_FAST: s->client (and MIXED_KEEP's s->bufarr) follow attribute k's on / vbo */
 static inline void client_set(VState *s, u32 k)
 {
     u32 b = 1u << k;
@@ -337,32 +292,31 @@ static inline void client_set(VState *s, u32 k)
         s->bufarr &= ~b;
 }
 
-/* draws so far on this thread's context (widescreen.c: was anything drawn before the menus this frame) */
 u32 gles_draws(void) { return vs()->draws; }
 
 static u32 type_bytes(u32 t)
 {
     switch (t) {
     case GL_BYTE: case GL_UNSIGNED_BYTE: return 1;
-    case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: case GL_HALF_FLOAT_OES: return 2;   /* shorts, half floats */
+    case GL_SHORT: case GL_UNSIGNED_SHORT: case GL_HALF_FLOAT: case GL_HALF_FLOAT_OES: return 2;
     default: return 4;
     }
 }
 
-/* READABLE_STABLE (optimisation pass 4): memory that stays readable for the whole run is told
-   without asking Windows: the exe's own image (the game's segments and data are in it; never unmapped) and the
-   calling thread's guest stack (rt_core.c; freed only when the thread ends).  The rest (the heap, which can give
-   pages back) is asked and kept for the frame only.  A profile of a race had VirtualQuery here at
-   ~6 % of the render thread's own work.  GT_GL_STATS=1 counts the queries. */
 static u32 img_lo, img_hi;
 static unsigned rd_query, rd_image, rd_stack, rd_live;
 static void image_range(void)
 {
+#ifdef _WIN32
     const u8 *base = (const u8 *)GetModuleHandleA(NULL);
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)base;
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
     img_lo = (u32)(uintptr_t)base;
     img_hi = img_lo + nt->OptionalHeader.SizeOfImage;
+#else
+    img_lo = GT_RESERVE_START;
+    img_hi = GT_IMPORT_BASE;
+#endif
 }
 static int stable(u32 a, u32 n)
 {
@@ -380,10 +334,6 @@ static int stable(u32 a, u32 n)
     return 0;
 }
 
-/* [a, a+n) committed and readable? Regions found are kept for the rest of the frame.
-   LIVE_BLOCKS (pass 6, liveblocks.c): a range inside a heap block that is allocated now (malloc'd and not freed
-   yet) is readable without asking Windows; a block freed since is no longer in the table, so its range is asked
-   of Windows (and found gone if the heap gave its pages back). */
 static int readable(VState *s, u32 a, u32 n)
 {
     if (stable(a, n))
@@ -422,16 +372,11 @@ static int readable(VState *s, u32 a, u32 n)
     return 1;
 }
 
-/* STATE_CACHE (below) */
 enum { SC_TEX, SC_PROG, SC_BLEND, SC_CAP, SC_MASK, SC_BUF, SC_UNI, SC_ARR, SC_KINDS };
 static int sc_enabled(void);
 static u32 sc_calls[SC_KINDS], sc_skipped[SC_KINDS];
-/* bumped by every glDeleteBuffers and glGenBuffers on any thread: GL may hand a deleted buffer's name out again,
-   and a context that still has the old one bound must bind the new one for real (STATE_CACHE) */
 static volatile LONG buf_gen;
 
-/* STATE_CACHE (optimisation pass 3): a bind of the buffer this context already has bound is not passed on, while
-   no buffer was deleted or made anywhere since that bind */
 void h_glBindBuffer(u32 target, u32 id)
 {
     VState *s = vs();
@@ -458,24 +403,10 @@ void h_glGenBuffers(u32 n, u32 ids)
     p_glGenBuffers(n, ids);
     InterlockedIncrement(&buf_gen);
 }
-/* DEFER_DELETE: a buffer deleted on one context while another still uses it
-   Why.  The game's loader thread (the shared EAGLContext) deletes buffers that the main context still has bound:
-   an enabled attribute array or the element buffer.  GL says such a buffer lives on until no context has it bound
-   any more (only the deleting context's own bindings are dropped), and on the iPad it does.  The desktop
-   driver here does not keep it (the main context's array became "buffer offset 0x18" read as memory 0x18 inside
-   nvoglv32.dll, see del_gen), so check_deleted had to leave such arrays out of the draws: geometry that used them
-   lost an attribute for as long as the game did not set it again.  A port fault (the driver's behaviour across
-   shared contexts), not the game's.
-   What.  glDeleteBuffers drops the deleting context's own bindings at once, as GL does; a buffer that another
-   context still has bound (an enabled attribute array, the array or the element buffer) is not passed to the
-   driver yet but kept on a list, and deleted at a later glDeleteBuffers or present once no context names it
-   (each context's shadow says what it has bound).  Its name stays taken until then, so glGenBuffers cannot hand
-   it out again meanwhile.  At most DD_MAX are kept; past that a delete goes straight through.
-   GT_GL_DEFER_DELETE=0: every delete straight to the driver (check_deleted still guards the draws). */
 #define DD_MAX 256
 static u32 dd_names[DD_MAX];
 static int dd_n, dd_on = -1;
-static unsigned dd_kept, dd_freed;      /* GT_GL_STATS: deletes held back, held ones deleted since */
+static unsigned dd_kept, dd_freed;
 static int dd_enabled(void)
 {
     if (dd_on < 0) {
@@ -485,14 +416,13 @@ static int dd_enabled(void)
     }
     return dd_on;
 }
-/* does a context other than skip (NULL: any) have buffer id bound? */
 static int dd_in_use(const VState *skip, u32 id)
 {
     int used = 0;
     AcquireSRWLockShared(&ctx_lock);
     for (int i = 0; i < 16 && ctx_vs[i].gl && !used; i++) {
         const VState *o = ctx_vs[i].s;
-        if (ctx_vs[i].gl == (void *)1 || !o || o == skip)   /* (void *)1: a destroyed context's slot */
+        if (ctx_vs[i].gl == (void *)1 || !o || o == skip)
             continue;
         if (o->array_buf == id || o->elem_buf == id)
             used = 1;
@@ -503,7 +433,6 @@ static int dd_in_use(const VState *skip, u32 id)
     ReleaseSRWLockShared(&ctx_lock);
     return used;
 }
-/* the kept buffers no context names any more: to the driver (caller holds del_lock exclusive, a context current) */
 static void dd_sweep_locked(void)
 {
     int w = 0, freed = 0;
@@ -523,7 +452,6 @@ static void dd_sweep_locked(void)
         InterlockedIncrement(&buf_gen);
     }
 }
-/* at each present (gles_state_forget) */
 static void dd_sweep(void)
 {
     if (!dd_n || !SDL_GL_GetCurrentContext())
@@ -544,16 +472,13 @@ void h_glDeleteBuffers(u32 n, u32 ids)
         if (v[i] && v[i] == s->array_buf) {
             s->array_buf = 0;
             if (defer)
-                p_glBindBuffer(GL_ARRAY_BUFFER, 0);            /* what the driver's delete would do to this context */
+                p_glBindBuffer(GL_ARRAY_BUFFER, 0);
         }
         if (v[i] && v[i] == s->elem_buf) {
             s->elem_buf = 0;
             if (defer)
                 p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
         }
-        /* an attribute array in this buffer: GL resets its binding to 0, so its offset becomes a pointer into
-           client memory (0x18 ...) that the driver reads if the array is still enabled, even when the program
-           does not use it (PowerVR does not).  Shadow that, so draw_prepare leaves it out of the draws. */
         for (u32 k = 0; v[i] && k < MAX_ATTR; k++)
             if (s->a[k].vbo == v[i]) {
                 s->a[k].vbo = 0;
@@ -595,12 +520,6 @@ void h_glDeleteBuffers(u32 n, u32 ids)
     ReleaseSRWLockExclusive(&del_lock);
 }
 
-/* a buffer deleted on another thread since this thread last looked: drop the bindings that name it.
-   The driver is asked what this context still has bound (not glIsBuffer alone): the loader thread deletes a
-   buffer and makes a new one, GL hands out the same name again, glIsBuffer says yes, but this context's
-   binding was already dropped.  That hole let the crash above back (menu after a race, iPad 3
-   mode with POSTFX: attribute 3 "buffer offset 0x18" read as memory 0x18 inside nvoglv32.dll).  The queries
-   run only after a delete somewhere, i.e. while loading, so draws pay nothing. */
 static u32 gl_int(u32 pname)
 {
     u32 v = 0;
@@ -627,21 +546,8 @@ static void check_deleted(VState *s)
     }
     s->array_buf = gl_int(GL_ARRAY_BUFFER_BINDING);
     s->elem_buf = gl_int(GL_ELEMENT_ARRAY_BUFFER_BINDING);
-    s->sc_abuf_gen = s->sc_ebuf_gen = SC_UNKNOWN;      /* the next binds go to the driver (STATE_CACHE) */
+    s->sc_abuf_gen = s->sc_ebuf_gen = SC_UNKNOWN;
 }
-/* ARRAY_CACHE (optimisation pass 6: STATE_CACHE extended to
-   glEnableVertexAttribArray): the game enables its attribute arrays again before every draw, 76-228 calls a frame
-   in a race, ~99 % of them for an array already on (measured on a test save, France Raceway, AMD).  Not
-   a fault of the game (on PowerVR the call is cheap) or of the port; each one is still a trip into the driver.
-   Like STATE_CACHE: a call that changes nothing is not passed on.  What keeps the shadow (sc_arr_known /
-   sc_arr_on, per GL context like the state it mirrors) true:
-   - the only other places that change these switches are draw_prepare / draw_done here (an unreadable array is
-     switched off for one draw and on again after it: the same state at the end) and eagl.c's present, which
-     saves and restores them (glPush/PopClientAttrib) and is followed by gles_state_forget;
-   - the game's ES 1 glEnableClientState / glDisableClientState (attribute 0 is the vertex array on some
-     drivers) forget the shadow;
-   - an array not known yet is passed on.
-   GT_GL_ARRAY_CACHE=0 (or GT_GL_STATE_CACHE=0): every call to the driver. */
 static int ac_on = -1;
 static int ac_enabled(void)
 {
@@ -694,18 +600,15 @@ void h_glVertexAttribPointer(u32 index, u32 size, u32 type, u32 norm, u32 stride
         Attr *a = &s->a[index];
         a->size = size, a->type = type, a->norm = norm, a->stride = stride, a->ptr = ptr, a->vbo = s->array_buf;
         client_set(s, index);
-        s->sv_moved &= ~(1u << index);   /* STREAM_VBO: the game's own pointer from now on */
+        s->sv_moved &= ~(1u << index);
         if (type == GL_FIXED && !a->vbo) {
             once("GL_FIXED vertex attributes from client memory: turned into floats at each draw");
-            return;                /* set at the draw */
+            return;
         }
     }
     p_glVertexAttribPointer(index, size, type, norm, stride, ptr);
 }
 
-/* an attribute array left out of a draw: logged once per kind (attribute, pointer, layout), then at its 10th, 100th
-   ... time (optimisation pass 4): a fixed first 20 of the run would all be alike after a replay (a buffer the
-   loader deleted) and hide the later kinds. */
 static void unreadable_note(u32 i, const Attr *a, u32 first, u32 last, u32 bufs)
 {
     enum { KINDS = 64 };
@@ -737,18 +640,6 @@ static void unreadable_note(u32 i, const Attr *a, u32 first, u32 last, u32 bufs)
         once("more kinds of unreadable attribute arrays than are counted: left out of draws, not logged");
 }
 
-/* FIXED_FAST and INDEX_FAST (optimisation pass 6)
-   Why.  Two loops of the draw path ran a value at a time: the GL_FIXED (16.16) arrays turned into floats at each draw
-   (7-25 thousand vertices a frame in a race, 50-250 us of the render thread at the 60 fps cap) and the scan of a
-   draw's indices for the vertex range it reads (33-95 thousand indices a frame).  Measured on a test save
-   (France Raceway, AMD built-in GPU).  Neither is a fault of the game or of the port, only slow.
-   What.  FIXED_FAST: four values at a time with SSE2 (cvtdq2ps then a multiply by 2^-16, the same two roundings as
-   the plain loop, so the same floats bit for bit; --selftest compares them), and with STREAM_VBO's mapped ring the
-   floats are written straight into the ring instead of into the array's float copy and then copied there.
-   INDEX_FAST: the smallest and largest index 8 (16-bit) or 16 (8-bit) at a time with SSE2 (--selftest compares
-   them with the plain loop).  Reads stay inside the arrays: a 3-value vertex is read as 8 + 4 bytes, the tail of the
-   indices one at a time.
-   GT_FIXED_FAST=0 / GT_INDEX_FAST=0: the plain loops (FIXED_FAST=0 also copies through the float copy). */
 static int fx_on = -1, ix_on = -1;
 static int fx_enabled(void)
 {
@@ -768,9 +659,8 @@ static int ix_enabled(void)
     }
     return ix_on;
 }
-static u32 fx_verts, fx_direct;          /* GT_GL_STATS: GL_FIXED vertices turned into floats, those into the ring */
+static u32 fx_verts, fx_direct;
 
-/* n vertices of `size` 16.16 values, `stride` bytes apart from src, into d (size floats a vertex) */
 static void fixed_plain(float *d, const u8 *src, u32 n, u32 size, u32 stride)
 {
     for (u32 v = 0; v < n; v++, src += stride, d += size)
@@ -811,7 +701,6 @@ static void fixed_convert(float *d, const u8 *src, u32 n, u32 size, u32 stride)
         fixed_plain(d, src, n, size, stride);
 }
 
-/* the smallest and largest of count indices of n bytes each */
 static void index_plain(const u8 *p, u32 count, u32 n, u32 *mn_, u32 *mx_)
 {
     u32 mn = 0xffffffff, mx = 0;
@@ -827,7 +716,7 @@ static void index_plain(const u8 *p, u32 count, u32 n, u32 *mn_, u32 *mx_)
 static void index_sse2(const u8 *p, u32 count, u32 n, u32 *mn_, u32 *mx_)
 {
     u32 mn = 0xffffffff, mx = 0, i = 0;
-    if (n == 2 && count >= 16) {         /* signed 16-bit min / max on the values with their top bit flipped */
+    if (n == 2 && count >= 16) {
         const __m128i flip = _mm_set1_epi16((short)0x8000);
         __m128i lo = _mm_set1_epi16(0x7fff), hi = flip;
         for (; i + 8 <= count; i += 8) {
@@ -861,13 +750,11 @@ static void index_sse2(const u8 *p, u32 count, u32 n, u32 *mn_, u32 *mx_)
                 mx = b[k];
         }
     }
-    u32 tmn, tmx;                        /* the rest (and 32-bit indices) one at a time */
+    u32 tmn, tmx;
     index_plain(p + i * n, count - i, n, &tmn, &tmx);
     *mn_ = tmn < mn ? tmn : mn, *mx_ = tmx > mx ? tmx : mx;
 }
 
-/* --selftest (selftest.c): FIXED_FAST and INDEX_FAST against the plain loops, on random values (the ends of the
-   ranges among them), every size, stride and length kind; the number of differences */
 int gles_selftest_fixed(void)
 {
     enum { NV = 67, MAXS = 24 };
@@ -886,7 +773,7 @@ int gles_selftest_fixed(void)
                 memset(b, 0x55, sizeof b);
                 fixed_plain(a, (const u8 *)src, n, size, stride);
                 fixed_sse2(b, (const u8 *)src, n, size, stride);
-                bad += memcmp(a, b, sizeof a) != 0;   /* the floats and the bytes after them */
+                bad += memcmp(a, b, sizeof a) != 0;
             }
     return bad;
 }
@@ -901,7 +788,7 @@ int gles_selftest_index(void)
             for (unsigned c = 0; c < sizeof counts / sizeof counts[0]; c++) {
                 for (u32 i = 0; i < sizeof buf; i++)
                     buf[i] = (u8)(round < 2 ? st_rand(&x) : round == 2 ? 0xff : round == 3 ? 0 : 0x80 + (st_rand(&x) & 1));
-                if (round == 5 && counts[c])     /* one extreme placed at the very end */
+                if (round == 5 && counts[c])
                     memset(buf + (counts[c] - 1) * n, 0xff, n);
                 for (u32 off = 0; off < 3; off++) {
                     u32 a0, a1, b0, b1;
@@ -913,20 +800,6 @@ int gles_selftest_index(void)
     return bad;
 }
 
-/* STREAM_VBO (optimisation pass 5; GT_STREAM_VBO=1 by default, 0 goes back to client arrays)
-   Why.  The game draws most of what it draws from vertex arrays in its own memory (an iPad has one memory for the
-   CPU and the GPU, so a "client array" costs it nothing).  A desktop driver has to copy such an array into memory
-   the GPU can read at every draw, inside the draw call, by its own paths: on NVIDIA's threaded driver that made each
-   such draw ~8x dearer in the FastFive port (REFastFive streamvbo.c), and built-in GPUs' drivers are
-   known for slow client-array paths.  Not a fault of the game or of the port.
-   What.  Before a draw with client arrays the host copies the vertices the draw uses (the range draw_prepare
-   already works out, from the indices) into a buffer object of its own (a 4 MB ring per GL context, renewed when
-   full) and points those arrays at it; client indices go into a 1 MB ring of their own the same way.  The bytes
-   drawn are the same.  The game's pointers stay shadowed (Attr): an array the host moved is set back before a draw
-   that is not streamed, and a glVertexAttribPointer of the game's replaces it.  GL_FIXED arrays are copied from
-   their float copy (draw_prepare).  The buffer bindings the game made are put back before the draw returns.
-   GT_STREAM_VBO=0: every draw (client arrays); subdata / map: how the bytes are copied (sv_mode below).
-   GT_GL_STATS=1 counts what it did every 600 frames. */
 #define SV_RING  (4u << 20)
 #define SV_IRING (1u << 20)
 typedef void(GT_GLAPI *T_sv_subdata)(u32 target, u32 off, u32 n, const void *p);
@@ -944,34 +817,11 @@ static T_sv_fence sv_fencesync;
 static T_sv_wait sv_clientwait;
 static T_sv_delsync sv_delsync;
 static int sv_on = -1;
-/* how the copies get there: 1 glBufferSubData into a ring renewed (orphaned) when full; 2 (default) a ring 4x the
-   size mapped once (glBufferStorage MAP_PERSISTENT | MAP_COHERENT, GL 4.4), the copy a memcpy, a fence a quarter so a
-   quarter is written again only after the GPU has drawn from it.  GT_STREAM_VBO=subdata / map picks one.
-   Why 2: mode 1 makes an AMD built-in GPU slower than no streaming at all, measured with a laptop in
-   hybrid mode (race at speed, uncapped, 2 runs each, a test save):
-                  off          subdata          map
-     AMD Radeon(TM)  328/348 fps  324/342 (CPU 120 %)  346/341 (CPU 86-99 %); capped 60: CPU 21 / 25 / 19 %
-     NVIDIA (hybrid) 244/237      282/281             305/296
-   AMD's driver does each glBufferSubData with work on its own threads; a mapped ring is a plain memcpy. */
 static int sv_mode;
 #define SV_SEGS 4
 static u32 sv_size(int w) { return (w ? SV_IRING : SV_RING) * (sv_mode == 2 ? SV_SEGS : 1); }
-/* GT_GL_STATS: draws, those with client arrays, those streamed, bytes copied, element buffers read back for an
-   index range, draws whose arrays did not fit */
 static struct { u32 draws, client, streamed, bytes, readback, nofit, mixed, kept, hit; } sv_st;
 
-/* MIXED_KEEP.  Why: a streamed draw was rebased (the ring's copy counted from vertex `first` / the lowest index:
-   glDrawArrays from 0, glDrawElementsBaseVertex with -lo), and a base vertex moves EVERY array of the draw,
-   also those read from the game's own buffer objects, which were not copied, so such an array would be read
-   lo vertices too early.  The game draws such mixes all the time in a race (nearly every streamed draw has
-   attribute 3 enabled from a buffer, France Raceway), but GT_GL_STATS shows that none of the programs of those
-   draws reads it (a left-over enabled array), so nothing drawn has looked wrong because of it so far.  A
-   latent port fault (STREAM_VBO, optimisation pass 5), closed before a draw that does read one shows it.
-   What: a draw with any enabled array in a buffer keeps its vertex numbers: the copies go into the ring where
-   the arrays' vertex 0 would be (sv_move's "not rebased", room for the vertices before them) and the draw is made
-   with the game's own first / indices.  A draw too far into its arrays for that is not streamed (client arrays,
-   as with GT_STREAM_VBO=0).
-   GT_STREAM_MIXED_KEEP=0 (testing only): rebased. */
 static int mk_on = -1;
 static int mk_enabled(void)
 {
@@ -982,8 +832,6 @@ static int mk_enabled(void)
     }
     return mk_on;
 }
-/* GT_GL_STATS: does the draw's program read one of the arrays from buffers (a draw MIXED_KEEP matters for)?
-   The attribute locations each program reads are asked once and kept (statistics only). */
 static int st_on = -1;
 static u32 prog_reads(u32 prog)
 {
@@ -1049,7 +897,6 @@ static int sv_enabled(void)
     return sv_on;
 }
 
-/* this context's rings, made on first use (and again if the thread's context is not the one they were made in) */
 static int sv_ready(VState *s)
 {
     void *ctx = SDL_GL_GetCurrentContext();
@@ -1058,7 +905,7 @@ static int sv_ready(VState *s)
     if (!ctx)
         return 0;
     u32 b[2] = {0, 0};
-    p_glGenBuffers(2, GA(b));          /* p_: not the game's (buf_gen): the names are never deleted */
+    p_glGenBuffers(2, GA(b));
     if (!b[0] || !b[1])
         return 0;
     unsigned char *mp[2] = {NULL, NULL};
@@ -1073,7 +920,7 @@ static int sv_ready(VState *s)
     }
     p_glBindBuffer(GL_ARRAY_BUFFER, s->array_buf);
     p_glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s->elem_buf);
-    if (sv_mode == 2 && (!mp[0] || !mp[1])) {   /* the driver would not map them: no streaming in this context */
+    if (sv_mode == 2 && (!mp[0] || !mp[1])) {
         rt_log("[gl] STREAM_VBO: the persistent rings could not be mapped; this context draws as before\n");
         return 0;
     }
@@ -1084,10 +931,6 @@ static int sv_ready(VState *s)
     return 1;
 }
 
-/* where the next total bytes of ring w (0 vertices, 1 indices) go, from *off on (*off may wrap to 0).  glBufferSubData
-   ring: a full ring is renewed (orphaned; the draws before keep the old bytes).  Persistent ring: each quarter it moves
-   into, the fence of when it last left that quarter is waited for (the GPU has drawn from it by then; at ~1 MB a frame
-   that was ~12 frames ago, so the wait is normally already over), and the quarter it leaves gets a new fence. */
 static void sv_room(VState *s, int w, u32 *off, u32 total)
 {
     u32 size = sv_size(w);
@@ -1108,9 +951,9 @@ static void sv_room(VState *s, int w, u32 *off, u32 total)
         cur = (cur + 1) % SV_SEGS;
         void **f = &s->sv_fence[w][cur];
         if (*f) {
-            for (int i = 0; i < 50; i++) {     /* GL_SYNC_FLUSH_COMMANDS_BIT the first time; 0.1 s a try */
+            for (int i = 0; i < 50; i++) {
                 u32 r = sv_clientwait(*f, i ? 0 : 1, 100000000ull);
-                if (r != GL_TIMEOUT_EXPIRED)               /* not GL_TIMEOUT_EXPIRED: signalled, or failed */
+                if (r != GL_TIMEOUT_EXPIRED)
                     break;
             }
             sv_delsync(*f);
@@ -1128,7 +971,6 @@ static void sv_write(VState *s, int w, u32 off, u32 bytes, u32 src)
         sv_subdata(w ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER, off, bytes, (const void *)(uintptr_t)src);
 }
 
-/* the arrays in m back to the game's memory (a draw that is not streamed) */
 static void sv_put_back(VState *s, u32 m)
 {
     m &= s->sv_moved;
@@ -1138,16 +980,13 @@ static void sv_put_back(VState *s, u32 m)
     for (u32 k = m; k; k &= k - 1) {
         u32 i = (u32)__builtin_ctz(k);
         Attr *a = &s->a[i];
-        if (a->type != GL_FIXED)      /* draw_prepare points those at their floats at each draw */
+        if (a->type != GL_FIXED)
             p_glVertexAttribPointer(i, a->size, a->type, a->norm, a->stride, a->ptr);
     }
     p_glBindBuffer(GL_ARRAY_BUFFER, s->array_buf);
     s->sv_moved &= ~m;
 }
 
-/* vertices first..last of the client arrays in m into the ring.  rebase: the ring's copy starts at vertex first
-   (the draw then counts from there); else at vertex 0's place, which needs room for first vertices before it.
-   0: it did not fit (nothing changed). */
 static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
 {
     struct { u32 lo, hi, base, stride; u32 i; } a[MAX_ATTR];
@@ -1156,7 +995,7 @@ static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
         u32 i = (u32)__builtin_ctz(k);
         const Attr *at = &s->a[i];
         u32 elem, stride, base;
-        if (at->type == GL_FIXED) {   /* its floats (draw_prepare): size floats a vertex, from vertex 0 */
+        if (at->type == GL_FIXED) {
             elem = stride = at->size * 4;
             base = (u32)(uintptr_t)at->conv;
         } else {
@@ -1169,13 +1008,12 @@ static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
         a[na].base = base, a[na].stride = stride, a[na].i = i;
         na++;
     }
-    for (int x = 1; x < na; x++)        /* by lo: arrays in one interleaved block are copied once */
+    for (int x = 1; x < na; x++)
         for (int y = x; y > 0 && a[y].lo < a[y - 1].lo; y--) {
             __typeof__(a[0]) t = a[y];
             a[y] = a[y - 1];
             a[y - 1] = t;
         }
-    /* the blocks first, so that a draw that does not fit changes nothing */
     struct { u32 glo, ghi, need; int x, y; } g[MAX_ATTR];
     int ng = 0;
     u32 total = 0;
@@ -1187,7 +1025,7 @@ static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
                 ghi = a[y].hi;
             y++;
         }
-        u32 need = 0;                   /* not rebased: the pointer is the copy's place - (glo - base) */
+        u32 need = 0;
         for (int k = x; k < y && !rebase; k++)
             if (glo - a[k].base > need)
                 need = glo - a[k].base;
@@ -1211,8 +1049,6 @@ static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
         if (off < g[j].need)
             off = (g[j].need + 15) & ~15u;
         u32 bytes = g[j].ghi - g[j].glo;
-        /* FIXED_FAST: a GL_FIXED array not converted yet (pend) is converted straight into the mapped ring when
-           its float copy is a block of its own (always: the copy is the host's memory); else into the copy first */
         int direct = 0;
         for (int k = g[j].x; k < g[j].y; k++) {
             u32 i = a[k].i;
@@ -1247,7 +1083,6 @@ static int sv_move(VState *s, u32 m, u32 first, u32 last, int rebase, u32 pend)
     return 1;
 }
 
-/* client indices into the index ring: the offset to draw with, or ~0 (then the draw reads the game's memory) */
 static u32 sv_indices(VState *s, u32 ptr, u32 bytes)
 {
     if (bytes > SV_IRING)
@@ -1258,10 +1093,9 @@ static u32 sv_indices(VState *s, u32 ptr, u32 bytes)
     sv_write(s, 1, off, bytes, ptr);
     s->sv_ioff = off + bytes;
     sv_st.bytes += bytes;
-    return off;                         /* the ring stays bound for the draw; the caller binds the game's back */
+    return off;
 }
 
-/* the vertices a draw reads: [*lo, *hi]; 0 if the indices cannot be read */
 static int index_range(VState *s, u32 count, u32 type, u32 ptr, u32 *lo, u32 *hi)
 {
     u32 n = type_bytes(type);
@@ -1289,7 +1123,6 @@ static int index_range(VState *s, u32 count, u32 type, u32 ptr, u32 *lo, u32 *hi
     return 1;
 }
 
-/* GT_GL_STATS: an array left out of a draw that its program reads (the draw then misses that data) */
 static void unreadable_used(u32 i)
 {
     if (st_on < 0)
@@ -1309,12 +1142,10 @@ static void unreadable_used(u32 i)
         rt_log("[gl] left out: attribute %u is not read by program %u (reads 0x%x)\n", i, prog, r);
 }
 
-/* before a draw over vertices [lo, hi] (have_range 0: unknown); returns a mask of arrays switched off for it.
-   pend (or NULL): GL_FIXED arrays left for sv_move / fixed_finish to convert (FIXED_FAST) */
 static u32 draw_prepare(VState *s, int have_range, u32 lo, u32 hi, u32 *pend)
 {
     u32 off = 0;
-    for (u32 m = s->client; m; m &= m - 1) {          /* DRAW_FAST: only the client-memory arrays */
+    for (u32 m = s->client; m; m &= m - 1) {
         u32 i = (u32)__builtin_ctz(m);
         Attr *a = &s->a[i];
         u32 elem = a->size * type_bytes(a->type);
@@ -1340,8 +1171,6 @@ static u32 draw_prepare(VState *s, int have_range, u32 lo, u32 hi, u32 *pend)
                     continue;
                 }
             }
-            /* FIXED_FAST with the mapped ring: converted by sv_move straight into the ring, or by fixed_finish
-               when the draw is not streamed (the float copy's address still places the array in sv_move) */
             if (pend && fx_enabled() && sv_enabled() && sv_mode == 2) {
                 *pend |= 1u << i;
                 continue;
@@ -1353,7 +1182,6 @@ static u32 draw_prepare(VState *s, int have_range, u32 lo, u32 hi, u32 *pend)
     }
     return off;
 }
-/* the GL_FIXED arrays in pend (draw_prepare) into their float copies, pointed at them: a draw not streamed */
 static void fixed_finish(VState *s, u32 pend, int have_range, u32 lo, u32 hi)
 {
     for (; pend; pend &= pend - 1) {
@@ -1375,6 +1203,7 @@ static void draw_done(u32 off)
 
 void h_glDrawArrays(u32 mode, u32 first, u32 count)
 {
+    softrefl_draw();
     VState *s = vs();
     s->draw_mode = mode, s->draw_count = count, s->draw_type = 0, s->draw_ptr = first, s->draws++;
     if (!count)
@@ -1388,7 +1217,7 @@ void h_glDrawArrays(u32 mode, u32 first, u32 count)
         u32 pend = 0;
         off = draw_prepare(s, 1, first, first + count - 1, &pend);
         u32 m = s->client & ~off;
-        int keep = first && (s->bufarr & ~off) && mk_enabled();    /* MIXED_KEEP */
+        int keep = first && (s->bufarr & ~off) && mk_enabled();
         if (m && sv_enabled() && sv_ready(s) && sv_move(s, m, first, first + count - 1, !keep, pend)) {
             sv_st.streamed++;
             if (s->bufarr & ~off)
@@ -1407,6 +1236,7 @@ void h_glDrawArrays(u32 mode, u32 first, u32 count)
 }
 void h_glDrawElements(u32 mode, u32 count, u32 type, u32 ptr)
 {
+    softrefl_draw();
     VState *s = vs();
     s->draw_mode = mode, s->draw_count = count, s->draw_type = type, s->draw_ptr = ptr, s->draws++;
     if (!count)
@@ -1418,7 +1248,6 @@ void h_glDrawElements(u32 mode, u32 count, u32 type, u32 ptr)
         gles_draw_unlock();
         return;
     }
-    /* the index range is needed only when some enabled array is in client memory */
     u32 lo = 0, hi = 0, off = 0;
     sv_st.draws++;
     if (s->client) {
@@ -1427,8 +1256,7 @@ void h_glDrawElements(u32 mode, u32 count, u32 type, u32 ptr)
         u32 pend = 0;
         off = draw_prepare(s, have, lo, hi, &pend);
         u32 m = s->client & ~off;
-        /* STREAM_VBO: rebased (the copy starts at vertex lo) when lo is 0 or the draw can say where it starts */
-        int keep = lo && (s->bufarr & ~off) && mk_enabled();       /* MIXED_KEEP: arrays in buffers too */
+        int keep = lo && (s->bufarr & ~off) && mk_enabled();
         int rebase = lo == 0 || (!keep && sv_basevertex && lo <= 0x7fffffffu);
         if (have && m && sv_enabled() && sv_ready(s) && sv_move(s, m, lo, hi, rebase, pend)) {
             sv_st.streamed++;
@@ -1455,26 +1283,6 @@ void h_glDrawElements(u32 mode, u32 count, u32 type, u32 ptr)
     gles_draw_unlock();
 }
 
-/* STATE_CACHE (port addition, optimisation pass 2): state shadowing for glBindTexture, glUseProgram and
-   glBlendFunc, to avoid redundant OpenGL driver calls while the GameSWF UI renders
-   gameswf binds the texture, the program and the blend function again before each of its many small draws, mostly
-   to what is already bound; each such call is a trip into the driver.  The context's bindings are shadowed here
-   (in its VState, so per context as GL keeps them) and a call that changes nothing is not passed on.
-   What keeps the shadow true:
-   - a texture or program deleted on any thread (the loader thread's shared context deletes and makes them while
-     loading; GL can hand the same name out again, and a context that still has the old one bound must bind the
-     new one for real) makes every context forget its texture / program shadow at its next bind;
-   - glBlendFuncSeparate (set behind glBlendFunc's back) forgets the blend shadow;
-   - the host's own GL work (eagl.c's present, glenhance.c) restores what it changes, and the shadow is forgotten
-     after each present as well (gles_state_forget), so nothing the host does can leave it stale for long.
-   GT_GL_STATE_CACHE=0: every call goes to the driver.  GT_GL_STATS=1 (testing): a log line every 600
-   frames with how many calls were left out, of each kind.
-   Optimisation pass 3 extends it to glBindBuffer, glEnable / glDisable (GL_BLEND, GL_DEPTH_TEST, GL_CULL_FACE,
-   GL_SCISSOR_TEST), glDepthMask, glColorMask and glUniform* per program object: the same, below.  Buffers: a bind
-   is left out only
-   while no buffer was deleted or made on any thread since (buf_gen), as a name can come back for a new buffer.
-   The caps: glEnable(GL_TEXTURE_2D) is per texture unit and is always passed on.  Uniforms: per program (GL
-   keeps them in the program, across contexts and frames), see UNIFORMS below. */
 static volatile LONG tex_del_gen, prog_del_gen;
 static int sc_on = -1;
 static int sc_enabled(void)
@@ -1490,7 +1298,7 @@ void gles_state_forget(void)
 {
     if (vs_)
         sc_forget(vs_);
-    dd_sweep();                          /* DEFER_DELETE: kept buffers no context names any more */
+    dd_sweep();
     static int stats = -1;
     if (stats < 0)
         stats = dev_getenv("GT_GL_STATS") && *dev_getenv("GT_GL_STATS") == '1';
@@ -1567,7 +1375,7 @@ void h_glDeleteTextures(u32 n, u32 ids)
 {
     VState *s = vs();
     const u32 *v = GP(ids);
-    for (u32 i = 0; v && i < n; i++) {          /* GL unbinds them in this context: the shadow follows */
+    for (u32 i = 0; v && i < n; i++) {
         for (u32 u = 0; u < 32; u++)
             if (v[i] && s->sc_tex[u] == v[i])
                 s->sc_tex[u] = 0;
@@ -1575,13 +1383,10 @@ void h_glDeleteTextures(u32 n, u32 ids)
             s->tk_tex0 = 0;
     }
     p_glDeleteTextures(n, ids);
-    InterlockedIncrement(&tex_del_gen);         /* other contexts: forget at their next bind */
+    InterlockedIncrement(&tex_del_gen);
 }
-/* Host uniforms (gles_add_host_uniform, gl.h): a shader given one of these uniforms (by a source patch,
-   gles_add_shader_patch) gets its value from the host whenever its program is used and the value is not the one it
-   holds.  A program's locations are looked up once, at its link. */
-#define HOST_UNI_MAX 32                 /* programs that have one */
-#define HOST_UNI_KINDS 4                /* uniforms registered */
+#define HOST_UNI_MAX 32
+#define HOST_UNI_KINDS 4
 static struct { const char *name; float (*value)(void); } host_uni_kind[HOST_UNI_KINDS];
 static int nhost_uni_kinds;
 static struct { u32 prog; int loc[HOST_UNI_KINDS]; float val[HOST_UNI_KINDS]; } host_uni[HOST_UNI_MAX];
@@ -1616,7 +1421,7 @@ static void host_uni_linked(u32 prog)
         host_uni[i].prog = any ? prog : 0;
         for (int k = 0; k < HOST_UNI_KINDS; k++) {
             host_uni[i].loc[k] = loc[k];
-            host_uni[i].val[k] = -1.0f;     /* not set yet */
+            host_uni[i].val[k] = -1.0f;
         }
     }
     ReleaseSRWLockExclusive(&host_uni_lock);
@@ -1667,7 +1472,7 @@ void h_glUseProgram(u32 prog)
     p_glUseProgram(prog);
     host_uni_used(prog);
 }
-static volatile LONG uni_gen;           /* UNIFORMS: bumped when program values may have changed behind the cache */
+static volatile LONG uni_gen;
 void h_glDeleteProgram(u32 prog)
 {
     p_glDeleteProgram(prog);
@@ -1692,7 +1497,6 @@ void h_glBlendFuncSeparate(u32 a, u32 b, u32 c_, u32 d)
     p_glBlendFuncSeparate(a, b, c_, d);
 }
 
-/* glEnable / glDisable: the context-wide switches gameswf and the scene renderer set before their draws */
 static int cap_bit(u32 cap)
 {
     switch (cap) {
@@ -1701,7 +1505,7 @@ static int cap_bit(u32 cap)
     case GL_CULL_FACE: return 2;
     case GL_SCISSOR_TEST: return 3;
     case GL_STENCIL_TEST: return 4;
-    case GL_ALPHA_TEST: return 5;               /* GL_ALPHA_TEST (ES 1) */
+    case GL_ALPHA_TEST: return 5;
     case GL_POLYGON_OFFSET_FILL: return 6;
     case GL_DITHER: return 7;
     }
@@ -1709,7 +1513,7 @@ static int cap_bit(u32 cap)
 }
 static void cap_set(u32 cap, int on)
 {
-    if (cap == GL_SCISSOR_TEST) {                 /* GL_SCISSOR_TEST (QUERY_FREE) */
+    if (cap == GL_SCISSOR_TEST) {
         VState *s = vs();
         s->tk_scissor_on = on != 0, s->tk_known |= TK_SCISSOR_ON;
     }
@@ -1757,26 +1561,15 @@ void h_glColorMask(u32 r, u32 g, u32 b, u32 a)
     p_glColorMask(v & 1, v >> 1 & 1, v >> 2 & 1, v >> 3 & 1);
 }
 
-/* UNIFORMS (STATE_CACHE, pass 3): a glUniform* that gives the current program the values it already has at
-   that location is not passed on.  GL keeps uniform values in the program object, the same for every context
-   and until the program is linked again, so the cache is by (program, location), across frames.  What keeps it
-   true:
-   - only one thread uses it, the one that sets uniforms first (the game's render thread); a uniform set on any
-     other thread, a glLinkProgram (it resets the values) or a glDeleteProgram (the name can come back) anywhere
-     empties it (uni_gen);
-   - the program must be known (the STATE_CACHE shadow of glUseProgram, per context), else the call is passed on;
-   - the values are compared as they are given (bits, the call's kind, count and transpose), at most 16 words;
-     a longer array is passed on and its slot forgotten. */
 #define UNI_SLOTS 2048
 typedef struct { u32 prog, loc, kind, n, v[16]; } Uni;
 static Uni *uni;
-static volatile LONG uni_owner;          /* the thread that uses the cache */
-static __thread int uni_mine = -1;       /* this thread is it: 1, is not: 0, not asked yet: -1 */
+static volatile LONG uni_owner;
+static __thread int uni_mine = -1;
 static u32 uni_seen = SC_UNKNOWN;
 enum { U_1F = 1, U_2F, U_3F, U_4F, U_1I, U_2I, U_3I, U_4I, U_1FV, U_2FV, U_3FV, U_4FV, U_1IV, U_2IV, U_3IV, U_4IV,
        U_M2, U_M3, U_M4 };
 
-/* 1: the program already has these values (the call is left out) */
 static int uni_same(u32 kind, u32 loc, const void *vals, u32 words)
 {
     if ((s32)loc < 0 || !sc_enabled())
@@ -1837,7 +1630,6 @@ void h_glUniform1i(u32 loc, u32 a) UNI_I(1, a)
 void h_glUniform2i(u32 loc, u32 a, u32 b) UNI_I(2, a, b)
 void h_glUniform3i(u32 loc, u32 a, u32 b, u32 c_) UNI_I(3, a, b, c_)
 void h_glUniform4i(u32 loc, u32 a, u32 b, u32 c_, u32 d) UNI_I(4, a, b, c_, d)
-/* the vector forms: count arrays of N words from the game's memory */
 #define UNI_V(name, kind, N)                                                            \
     void h_##name(u32 loc, u32 count, u32 ptr)                                          \
     {                                                                                   \
@@ -1863,7 +1655,6 @@ UNI_M(glUniformMatrix2fv, U_M2, 4)
 UNI_M(glUniformMatrix3fv, U_M3, 9)
 UNI_M(glUniformMatrix4fv, U_M4, 16)
 
-/* from the fault handler, on the faulting thread */
 void gles_fault_dump(void)
 {
     VState *s = vs_;
@@ -1887,9 +1678,6 @@ void h_glVertexPointer(u32 size, u32 type, u32 stride, u32 ptr)
     p_glVertexPointer(size, type, stride, ptr);
 }
 
-/* shaders */
-
-/* gles_add_shader_patch (gl.h): source patches run at glShaderSource, in the order registered */
 #define SHADER_PATCHES_MAX 4
 static char *(*shader_patches[SHADER_PATCHES_MAX])(const char *src);
 static int nshader_patches;
@@ -1902,8 +1690,6 @@ int gles_add_shader_patch(char *(*patch)(const char *src))
     return 1;
 }
 
-/* GLSL ES 1.00 -> GLSL 1.20: no #version / #extension lines of ES, no precision statements, and the
-   precision words defined away */
 static char *translate_shader(const char *src)
 {
     static const char head[] = "#version 120\n#define lowp\n#define mediump\n#define highp\n";
@@ -1955,7 +1741,7 @@ void h_glShaderSource(u32 shader, u32 count, u32 strings, u32 lengths)
         o += len;
     }
     *o = 0;
-    for (int k = 0; k < nshader_patches; k++) {     /* gles_add_shader_patch: each in turn, NULL = unchanged */
+    for (int k = 0; k < nshader_patches; k++) {
         char *patched = shader_patches[k](all);
         if (patched) {
             free(all);
@@ -1985,10 +1771,9 @@ void h_glCompileShader(u32 shader)
 
 void h_glLinkProgram(u32 prog)
 {
-    /* the position attribute at 0, as desktop GL draws nothing without attribute 0 on some drivers */
     p_glBindAttribLocation(prog, 0, GA("position"));
     p_glLinkProgram(prog);
-    InterlockedIncrement(&uni_gen);      /* STATE_CACHE: a link resets the program's uniforms */
+    InterlockedIncrement(&uni_gen);
     host_uni_linked(prog);
     int ok = 0;
     p_glGetProgramiv(prog, GL_LINK_STATUS, GA(&ok));
@@ -2003,15 +1788,6 @@ void h_glLinkProgram(u32 prog)
     }
 }
 
-/* QUERY_FREE (optimisation pass 4): the host's own GL work (eagl.c's present each frame,
-   widescreen.c's side bands) saves the state it changes; with glGetIntegerv / glGetFloatv that is 8 + 3 queries
-   a frame.
-   A query makes a threaded driver finish the commands queued so far first: measured (GT_GL_STATS) 0.04-0.17 ms a
-   frame in present and 0.20 ms in the side bands, which run in the middle of a frame.  So each context keeps what
-   was last set through the game's calls and the host's binds (gles_bind_fb / gles_bind_rb: every host bind of a
-   framebuffer or renderbuffer goes through them); a value not known yet is asked once and kept.  Whatever the
-   host changes it restores (present: glPopAttrib and its rebinds; the side bands: their own restore), so what is
-   kept stays true.  GT_GL_QUERY_FREE=0: every value asked of the driver.  GT_GL_QUERY_CHECK=1 (testing): both, compared. */
 static int qf_on = -1, qf_check;
 static int qf_enabled(void)
 {
@@ -2059,7 +1835,6 @@ void h_glClearColor(float r, float g, float b, float a)
     p_glClearColor(r, g, b, a);
 }
 
-/* the current value of `pname` (one of those below) into out: kept, or asked (then kept) */
 void gles_state(u32 pname, void *out)
 {
     VState *s = vs();
@@ -2069,12 +1844,12 @@ void gles_state(u32 pname, void *out)
     case GL_CURRENT_PROGRAM: bit = TK_PROG, k = &s->tk_prog; break;
     case GL_ACTIVE_TEXTURE: bit = TK_UNIT, k = &s->tk_unit; break;
     case GL_READ_FRAMEBUFFER_BINDING: bit = TK_RFB, k = &s->tk_rfb; break;
-    case GL_FRAMEBUFFER_BINDING: bit = TK_DFB, k = &s->tk_dfb; break;                   /* GL_DRAW_FRAMEBUFFER_BINDING */
+    case GL_FRAMEBUFFER_BINDING: bit = TK_DFB, k = &s->tk_dfb; break;
     case GL_RENDERBUFFER_BINDING: bit = TK_RB, k = &s->tk_rb; break;
     case GL_SCISSOR_TEST: bit = TK_SCISSOR_ON, k = &s->tk_scissor_on; break;
     case GL_SCISSOR_BOX: bit = TK_BOX, k = s->tk_box, n = 4; break;
-    case GL_COLOR_CLEAR_VALUE: bit = TK_CLEAR, k = (u32 *)s->tk_clear, n = 4; break;  /* GL_COLOR_CLEAR_VALUE (floats) */
-    case GL_TEXTURE_BINDING_2D: bit = TK_TEX0, k = &s->tk_tex0; break;                 /* GL_TEXTURE_BINDING_2D of unit 0 */
+    case GL_COLOR_CLEAR_VALUE: bit = TK_CLEAR, k = (u32 *)s->tk_clear, n = 4; break;
+    case GL_TEXTURE_BINDING_2D: bit = TK_TEX0, k = &s->tk_tex0; break;
     case GL_ARRAY_BUFFER_BINDING: *o = s->array_buf; return;
     case GL_ELEMENT_ARRAY_BUFFER_BINDING: *o = s->elem_buf; return;
     default:
@@ -2088,7 +1863,7 @@ void gles_state(u32 pname, void *out)
     u32 v[4] = {0};
     if (pname == GL_COLOR_CLEAR_VALUE)
         p_glGetFloatv(pname, GA(v));
-    else if (pname == GL_TEXTURE_BINDING_2D) {                                         /* unit 0's, the active unit kept */
+    else if (pname == GL_TEXTURE_BINDING_2D) {
         u32 was = 0;
         p_glGetIntegerv(GL_ACTIVE_TEXTURE, GA(&was));
         p_glActiveTexture(GL_TEXTURE0);

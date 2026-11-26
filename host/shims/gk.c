@@ -1,27 +1,9 @@
-/* gk.c -- GameKit's GKSession over the local network: the game's Bluetooth multiplayer on PC.
-
-   LAN_MULTIPLAYER (net.c; GT_LAN_MULTIPLAYER=0 turns both Local and Bluetooth off).
-   The game's Bluetooth mode (NetworkManagerBT, BTController 0x2ad364..0x2adc2c)
-   talks to GameKit only: GKSession initWithSessionID:@"GTRacing" displayName:sessionMode:, setAvailable:,
-   connectToPeer:withTimeout:, acceptConnectionFromPeer:error:, sendData:toPeers:withDataMode:error:,
-   displayNameForPeer:, disconnectFromAllPeers, and the delegate's session:peer:didChangeState: /
-   didReceiveConnectionRequestFromPeer: / connectionWithPeerFailed:withError: / didFailWithError:, with
-   the data handler's receiveData:fromPeer:inSession:context:.  Peer IDs are numeric strings (the game
-   takes their intValue).  Windows has no GameKit (and Bluetooth between PCs is rare), so the same
-   session runs over the network the Local mode uses:
-     - a session that is available in server or peer mode sends a beacon every second to UDP port 28191
-       (net_broadcast: every subnet + GT_LAN_PEERS), with its peer ID, mode, session ID, display name and
-       its TCP port;  a client- or peer-mode session with the same session ID reports the sender as
-       Available, and as Unavailable when beacons stop for 3.5 s;
-     - connectToPeer opens TCP to that port and sends HELLO; the other side's delegate gets the
-       connection request, acceptConnectionFromPeer answers ACCEPT, and both report Connected;
-     - data goes as frames on that connection (reliable and unreliable alike: TCP on a LAN);
-       a closed connection reports Disconnected.
-   Everything runs from a perform on the thread that made the session (like GameKit's main run loop
-   callbacks), every 15 ms while a session lives: no extra thread, no locks.  With the network off the
-   session fails at once (session:didFailWithError:), which the game shows as "Bluetooth is off". */
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include "compat_net.h"
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,13 +53,12 @@ typedef struct { u32 isa; Sess *s; } GkObj;
 static Sess *sessions[MAX_SESS];
 static SOCKET udp = INVALID_SOCKET, tcp_listen = INVALID_SOCKET;
 static u16 tcp_port_be;
-static SOCKET pending[8];                 /* accepted, HELLO not read yet */
+static SOCKET pending[8];
 static u8 pending_buf[8][256];
 static u32 pending_n[8];
 static id pump_obj;
 static int pump_on;
 
-/* BACKGROUND_THROTTLE (uikit.c): a Bluetooth (GKSession) game is open: the window keeps its full frame rate */
 int gk_sessions_open(void)
 {
     for (int i = 0; i < MAX_SESS; i++)
@@ -85,8 +66,6 @@ int gk_sessions_open(void)
             return 1;
     return 0;
 }
-
-/* helpers */
 
 static void log_gk(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void log_gk(const char *fmt, ...)
@@ -108,10 +87,10 @@ static u32 new_peer_id(void)
         x = (u64)q.QuadPart ^ ((u64)GetCurrentProcessId() << 32) ^ 0x9e3779b97f4a7c15ull;
     }
     x ^= x << 13, x ^= x >> 7, x ^= x << 17;
-    return (u32)(x % 2000000000u) + 100000000u;     /* ten digits like an iPad's */
+    return (u32)(x % 2000000000u) + 100000000u;
 }
 
-static id peer_new(u32 pid)        /* +1 */
+static id peer_new(u32 pid)
 {
     char b[16];
     snprintf(b, sizeof b, "%u", pid);
@@ -170,8 +149,6 @@ static int transport_up(void)
     return 1;
 }
 
-/* frames */
-
 static void conn_close(Conn *k)
 {
     if (k->s != INVALID_SOCKET)
@@ -188,7 +165,7 @@ static void conn_flush(Conn *k)
     while (k->txn) {
         int r = send(k->s, (const char *)k->tx, (int)k->txn, 0);
         if (r <= 0)
-            return;                          /* would block (or broken: recv sees it) */
+            return;
         memmove(k->tx, k->tx + r, k->txn - (u32)r);
         k->txn -= (u32)r;
     }
@@ -211,7 +188,6 @@ static void conn_put(Conn *k, int type, const void *p, u32 n)
     conn_flush(k);
 }
 
-/* HELLO: from, to, session ID, display name */
 static void send_hello(Sess *s, Conn *k)
 {
     u8 b[160];
@@ -222,8 +198,6 @@ static void send_hello(Sess *s, Conn *k)
     b[n++] = nl, memcpy(b + n, s->name, nl), n += nl;
     conn_put(k, F_HELLO, b, n);
 }
-
-/* delegate calls (the session kept alive across each) */
 
 static void tell_state(Sess *s, u32 peer, int state)
 {
@@ -264,8 +238,6 @@ static void tell_data(Sess *s, u32 peer, const u8 *p, u32 n)
     objc_release(ps);
     objc_release(d);
 }
-
-/* the pump */
 
 static Sess *sess_find(u32 me)
 {
@@ -354,7 +326,7 @@ static void beacons_read(void)
             continue;
         snprintf(name, sizeof name, "%.*s", (int)nl, (const char *)b + 14 + sl);
         if (sess_find(id_))
-            continue;                        /* one of ours */
+            continue;
         for (int i = 0; i < MAX_SESS; i++) {
             Sess *s = sessions[i];
             if (!s || !s->available || s->mode == M_SERVER || strcmp(s->sid, sid))
@@ -374,7 +346,7 @@ static void beacons_read(void)
             if (fresh && !conn_find(s, id_)) {
                 char a[16];
                 inet_ntop(AF_INET, &x->ip, a, sizeof a);
-                log_gk("found player %u at %s", id_, a);    /* no names in the log (privacy) */
+                log_gk("found player %u at %s", id_, a);
                 tell_state(s, id_, GKS_AVAILABLE);
                 if (!sess_alive(s))
                     break;
@@ -392,7 +364,7 @@ static void seen_expire(Sess *s)
             s->seen[i] = s->seen[--s->n_seen];
             if (!conn_find(s, id_)) {
                 tell_state(s, id_, GKS_UNAVAILABLE);
-                return;                      /* one per pump: the session may be gone */
+                return;
             }
         }
 }
@@ -420,7 +392,6 @@ static void accept_new(void)
     }
 }
 
-/* an accepted connection's HELLO names the session it is for */
 static void pending_read(void)
 {
     for (int i = 0; i < 8; i++) {
@@ -469,7 +440,6 @@ static void pending_read(void)
         k->peer = from;
         k->state = C_INCOMING;
         snprintf(k->name, sizeof k->name, "%s", name);
-        /* anything after the HELLO is the peer's data */
         u32 rest = pending_n[i] - (4 + len);
         if (rest) {
             k->rxcap = rest + 4096;
@@ -479,11 +449,10 @@ static void pending_read(void)
         }
         pending[i] = INVALID_SOCKET;
         tell_request(s, from);
-        return;                              /* the session may be gone now */
+        return;
     }
 }
 
-/* one session's connections: dialing, frames in; returns 0 when a callback ended the pass */
 static int conns_step(Sess *s)
 {
     DWORD now = GetTickCount();
@@ -522,7 +491,6 @@ static int conns_step(Sess *s)
             return 0;
         }
         conn_flush(k);
-        /* frames in */
         for (;;) {
             if (k->rxcap - k->rxn < 4096) {
                 k->rxcap = k->rxcap * 2 + 8192;
@@ -621,7 +589,6 @@ static void pump(CPU *c)
             if (sess_alive(s))
                 for (int n = 0; n < 64 && sess_alive(s) && !conns_step(s); n++)
                     ;
-            /* RED_BULL_BOARD (board.c): each connected player's address gets our leaderboard */
             for (int k = 0; sess_alive(s) && k < MAX_CONN; k++) {
                 if (s->conns[k].state != C_CONNECTED)
                     continue;
@@ -634,7 +601,6 @@ static void pump(CPU *c)
         }
         board_poll();
     } else {
-        /* no network: the session fails, like GameKit with Bluetooth off */
         for (int i = 0; i < MAX_SESS; i++) {
             Sess *s = sessions[i];
             if (!s || !s->available || s->failed_told || !s->delegate)
@@ -662,13 +628,10 @@ static void pump_start(void)
     ns_perform_here(pump_obj, "gtPump", 0, 0.015);
 }
 
-/* GKSession */
-
 static void s_alloc(CPU *c) { ret_i(c, ns_alloc(SELF, sizeof(GkObj))); }
 
 static void s_init(CPU *c)
 {
-    /* initWithSessionID:displayName:sessionMode: */
     id self = SELF;
     Sess *s = calloc(1, sizeof *s);
     s->obj = self;
@@ -677,7 +640,6 @@ static void s_init(CPU *c)
     if (ARG(1) && *ns_utf8(ARG(1))) {
         snprintf(s->name, sizeof s->name, "%s", ns_utf8(ARG(1)));
     } else {
-        /* GameKit would use the device's name; the PC's name is not sent to other players */
         snprintf(s->name, sizeof s->name, "GT Racing PC");
     }
     s->mode = (int)ARG(2);
@@ -737,7 +699,7 @@ static void s_setAvailable(CPU *c)
     if (!s)
         return;
     s->available = (ARG(0) & 0xff) != 0;
-    s->beacon_at = GetTickCount() - BEACON_MS;      /* the first beacon at once */
+    s->beacon_at = GetTickCount() - BEACON_MS;
     if (!s->available)
         s->n_seen = 0;
     pump_start();
@@ -768,7 +730,6 @@ static void s_displayNameForPeer(CPU *c)
 
 static void s_connect(CPU *c)
 {
-    /* connectToPeer:withTimeout: */
     Sess *s = GS(SELF);
     u32 p = peer_of(ARG(0));
     double t = arg_d(c, 3);
@@ -782,7 +743,7 @@ static void s_connect(CPU *c)
     if (!k)
         return;
     k->peer = p;
-    memcpy(k->name, x->name, sizeof k->name);       /* both 64 bytes, NUL-ended */
+    memcpy(k->name, x->name, sizeof k->name);
     k->name[sizeof k->name - 1] = 0;
     k->s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     nonblock(k->s);
@@ -814,7 +775,6 @@ static void s_cancelConnect(CPU *c)
 
 static void s_accept(CPU *c)
 {
-    /* acceptConnectionFromPeer:error: */
     Sess *s = GS(SELF);
     Conn *k = s ? conn_find(s, peer_of(ARG(0))) : NULL;
     if (!k || k->state != C_INCOMING) {
@@ -825,7 +785,7 @@ static void s_accept(CPU *c)
     }
     conn_put(k, F_ACCEPT, NULL, 0);
     k->state = C_CONNECTED;
-    k->tell_connected = 1;                   /* reported from the pump, like GameKit */
+    k->tell_connected = 1;
     log_gk("accepted %u", k->peer);
     ret_i(c, 1);
 }
@@ -853,7 +813,6 @@ static int send_to(Sess *s, u32 p, id data)
 
 static void s_sendData(CPU *c)
 {
-    /* sendData:toPeers:withDataMode:error: */
     Sess *s = GS(SELF);
     id data = ARG(0), list = ARG(1);
     int ok = s && data && list;
@@ -867,7 +826,6 @@ static void s_sendData(CPU *c)
 
 static void s_sendAll(CPU *c)
 {
-    /* sendDataToAllPeers:withDataMode:error: */
     Sess *s = GS(SELF);
     int ok = s && ARG(0);
     if (ok)

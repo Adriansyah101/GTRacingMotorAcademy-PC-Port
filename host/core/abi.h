@@ -1,5 +1,3 @@
-/* abi.h -- reading arguments the way the iOS ARM ABI passes them (bridges.c and raw bridges).
-   Word i of the argument list is r0-r3 for i < 4, then the guest stack at sp + 4 * (i - 4). */
 #ifndef GT_ABI_H
 #define GT_ABI_H
 
@@ -26,9 +24,6 @@ static inline void ret_l(CPU *c, u64 v) { c->r[0] = (u32)v; c->r[1] = (u32)(v >>
 static inline void ret_f(CPU *c, float v) { c->r[0] = f2bits(v); }
 static inline void ret_d(CPU *c, double v) { ret_l(c, d2bits(v)); }
 
-/* The variadic words from word `first` on, made contiguous (what an ARM callee does by pushing
-   r0-r3 next to its stack arguments).  The layout is an i386 va_list: 4-byte words, 64-bit
-   values in two words with no alignment, so the host's vsnprintf can take it as it is. */
 #define VA_WORDS 96
 static inline const u32 *va_words(CPU *c, int first, u32 *buf)
 {

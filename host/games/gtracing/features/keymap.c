@@ -1,25 +1,8 @@
-/* keymap.c -- KEY_MAP (port addition): a remappable keyboard and gamepad keys page in Options > Controls
-   when Touch Screen = Off.
-
-   The default driving keys (pcinput.c): A/D or Left/Right steer, W/Up gas, S/Down brake, Shift / Ctrl gears,
-   V look back, C camera, Esc pause; the pad laid out like Gran Turismo 7's, PAD_GT7.  Here each
-   of the nine actions has two keyboard keys and one pad input, those same ones by default, which the
-   Keyboard / Gamepad page (Options > Controls with Touch Screen Off, pcctl.c) changes: a click on a
-   cell, then the key or the pad's button / trigger / stick direction.  While a cell waits:
-     Esc         leaves it as it was (a key cell or a pad cell)
-     Backspace,  Delete: no key in that slot (a keyboard cell)
-     a mouse click anywhere, or 8 s: leaves it as it was.
-   A key or a pad input already used by another action is taken from it (one action per key).
-   The menus' own keys stay fixed, as they were: W A S D / the arrows, Enter, Esc (KEY_MENU); the pad's
-   D-pad, left stick, Cross (A), Circle (B) (PAD_MENU_SNAP).  In the menus, a pad action on one of those
-   pad buttons does nothing (Cross selects there; before, only gear up on Cross was held back).
-   The keys are saved per profile in <home>\Library\Preferences\pc_keys.txt (no file: the defaults).
-   Key names are SDL's (layout keys: W is the key that types W). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "features.h"
 
@@ -29,9 +12,9 @@ static const char *const action_title[KM_ACTIONS] = {
     "Steer Left", "Steer Right", "Gas", "Brake", "Gear Up", "Gear Down", "Look Back", "Camera", "Pause"};
 
 typedef struct {
-    const char *id, *xbox, *ps;     /* file name; label on an Xbox / PlayStation pad */
-    int button;                     /* SDL_GamepadButton, or -1: an axis */
-    int axis, sign;                 /* the axis and its half (+1, -1; triggers +1) */
+    const char *id, *xbox, *ps;
+    int button;
+    int axis, sign;
 } PadInput;
 
 static const PadInput pad_in[] = {
@@ -70,21 +53,20 @@ static const SDL_Keycode key_default[KM_ACTIONS][KM_KEYS] = {
 static const int pad_default[KM_ACTIONS] = {P_LX_NEG, P_LX_POS, P_RT, P_LT, P_A, P_X, P_LB, P_RB, P_START};
 
 static SDL_Keycode keys[KM_ACTIONS][KM_KEYS];
-static int pads[KM_ACTIONS];            /* pad_in index, -1 none */
+static int pads[KM_ACTIONS];
 static unsigned char held[KM_ACTIONS][KM_KEYS];
-static unsigned taps;                   /* bit per action: a key went down since keymap_key_tap looked */
-static int version = 1;                 /* changes when a cell's text does (pcctl.c refreshes them) */
-static int ps_pad;                      /* the pad in use is a PlayStation one (its labels) */
-static int has_pad;                     /* a pad is plugged in (notouch.c names its Cross / A) */
+static unsigned taps;
+static int version = 1;
+static int ps_pad;
+static int has_pad;
 
 static struct {
     int active, action, col;
-    int armed;                          /* pad: everything was let go since the click */
+    int armed;
     Uint64 until;
 } cap;
-static int pad_quiet;                   /* after a pad capture: the pad stays out of the menus until let go */
+static int pad_quiet;
 
-/* the file */
 static const char *file_path(char *buf, size_t n)
 {
     char g[512];
@@ -161,10 +143,8 @@ void keymap_init(void)
     load();
 }
 
-/* the game's input */
 int keymap_key(SDL_Keycode k, int down, int repeat)
 {
-    /* waiting: a press is taken here; a let-go still goes on (Enter, which clicked the cell, held) */
     if (cap.active && down) {
         if (repeat)
             return 1;
@@ -175,12 +155,12 @@ int keymap_key(SDL_Keycode k, int down, int repeat)
             rt_log("[keymap] %s: left as it was\n", action_title[a]);
             return 1;
         }
-        if (col >= KM_KEYS)              /* a pad cell: only Esc (above) from the keyboard */
+        if (col >= KM_KEYS)
             return 1;
         if (k == SDLK_BACKSPACE || k == SDLK_DELETE)
             k = 0;
         else
-            for (int b = 0; b < KM_ACTIONS; b++)     /* one action per key: taken from another */
+            for (int b = 0; b < KM_ACTIONS; b++)
                 for (int s = 0; s < KM_KEYS; s++)
                     if (keys[b][s] == k && (b != a || s != col)) {
                         rt_log("[keymap] %s key %d: %s taken off\n", action_title[b], s + 1, SDL_GetKeyName(k));
@@ -226,14 +206,12 @@ static float pad_value(SDL_Gamepad *p, int i)
 
 float keymap_pad(SDL_Gamepad *p, int a) { return pad_value(p, pads[a]); }
 
-/* the pad's menu buttons (PAD_MENU_SNAP): D-pad, left stick, Cross, Circle */
 int keymap_pad_menu_input(int a)
 {
     int i = pads[a];
     return i == P_A || i == P_B || (i >= P_UP && i <= P_LY_POS);
 }
 
-/* a driving action is on a half of the right stick (RACE_LOOK, racelook.c, then leaves the stick alone) */
 int keymap_right_stick_bound(void)
 {
     for (int a = 0; a < KM_ACTIONS; a++)
@@ -243,8 +221,6 @@ int keymap_right_stick_bound(void)
     return 0;
 }
 
-/* once a frame from ui_pump: 1 = the pad is busy here (a cell waits, or the press that set it is still
-   held), the menus do not take it */
 int keymap_frame(SDL_Gamepad *p)
 {
     has_pad = p != NULL;
@@ -275,7 +251,7 @@ int keymap_frame(SDL_Gamepad *p)
             pad_quiet = 0;
         return pad_quiet || (cap.active && p);
     }
-    if (!cap.armed) {                    /* the Cross that clicked the cell may still be down */
+    if (!cap.armed) {
         cap.armed = most < 0.3f;
         return 1;
     }
@@ -296,7 +272,6 @@ int keymap_frame(SDL_Gamepad *p)
     return 1;
 }
 
-/* the Keyboard / Gamepad page (pcctl.c) */
 const char *keymap_title(int a) { return action_title[a]; }
 
 const char *keymap_cell(int a, int col)
@@ -345,5 +320,4 @@ void keymap_defaults(void)
 
 int keymap_version(void) { return version; }
 
-/* NO_TOUCH_TEXT (notouch.c): 0 no pad, 1 an Xbox-like pad (A), 2 a PlayStation pad (Cross) */
 int keymap_pad_kind(void) { return has_pad ? 1 + ps_pad : 0; }

@@ -1,44 +1,3 @@
-"""PREMIUM_LICENCES + PREMIUM_AUDIO add-ons, built from the paid GT Racing Motor Academy iPad app
-(GTRacingiPad.app, Version.txt 1.1.4, older than the free HD 1.3.4b this port runs): the three licence tests the
-free build cut, and the paid build's 44 kHz audio.  Gameloft's files: never shipped, never in the repository.
-
-    python -I tools/premium_addon.py [premium .app folder] [add-on folder]
-
-Builds two add-on folders (host/shims/ns_misc.c reads every add-on\\<folder>\\ as bundle files):
-
-add-on\\premium-licences\\ -- the three licence tests the free build cut.
-  The game opens every licence<N>.ba3 the bundle lists (seen by GT_TRACE: in name order after the bundle's
-  contentsOfDirectoryAtPath).  A file: u32 n, u16 0, (n - 1) x (u16 index, u32 end) relative to the table's
-  end, 0xffff; section 0 the record, then one text pack per language (u32 zlib length, u32 text size, zlib,
-  padded to 32 bytes), zero bytes to a 32-byte size.  Record: u32 test id, u32 track, u16, u32, u16 test type,
-  u8 n + n x u32 medal times, the rest.
-  - The premium files (n = 8): 6 languages (EN FR DE ES IT JA).  The free ones (n = 13): 11 (+ KO ZH RU and
-    two Portuguese), the type one higher (a type was added before them), and 22 bytes after the times
-    (09 05, then 5 words: the free build's rewards; their meaning is not known).
-  - Premium has 24 tests (ids 0-23); free has 21: Cornering 2 (id 2), Overtaking 1 (id 3) and Braking 2 (id 4)
-    are gone, the free id 3 is premium's Full Lap 1 (premium id 5) and the free build renumbered the titles.
-  - Here: licence3 = Cornering 2 (id 2), licence5 = Braking 2 (id 4), licence6 = Overtaking 1 (id 5: the free
-    id 3 stays Full Lap 1, so a save's medal stays on its test).  Their 5 new languages: Cornering 2 and Braking 2
-    take the free build's Cornering 1 / Braking 1 text with the number changed (the same task), Overtaking 1
-    the English (the free texts name other cars).  Rewards: the medal words of a free test of the same type,
-    the fourth word (it rises with the id) between the free ids around it, the fifth the smaller of theirs.
-    The medal times stay premium's (the free build eased only Braking 1 and Cornering 1's).
-  - Which tests a class shows is License.bin (ElciNFi.TlN), not the files: loading the three alone left class C
-    at three tests.  Class C here: ids 0 1 2 5 4 3, premium's order.  The save keeps
-    medals by place, so host/games/gtracing/features/licences.c turns the places the game asks for into the free build's (a save's
-    Full Lap 1 medal stays on Full Lap 1, the save keeps the free layout).
-  - A class is passed when all its tests have a medal (0x2659cc: the smallest): with the three new tests not
-    yet driven, class C is not passed and the game sends the player to the licence office before events.
-  - The free tests whose numbers moved get premium's numbers back (Cornering 2-5 -> 3-6, Braking 2-4 -> 3-5,
-    Overtaking 1-3 -> 2-4), files of the same name as the bundle's, read instead of them.
-  - The premium texts' Spanish / French / Italian letters the free build corrected are corrected the same way
-    (the replacements are learnt from the tests both builds have).
-
-add-on\\premium-audio\\ -- the premium build's sounds (.ba6 WAV) where they are better than the free build's: the
-  19 music tracks (IMA ADPCM stereo) 44100 Hz there, 32000 Hz in free, and 102 effects, mostly the engines
-  (PCM mono), 22050 Hz there, 16000 Hz in free.  Sounds of the same rate in both (46) and the free build's own
-  sounds stay.  host/shims/al.c plays every buffer at the rate the game gives it.
-"""
 import os
 import re
 import shutil
@@ -58,7 +17,6 @@ CODE = dict(a='BU', b='BW', c='C4', d='DS', e='EZ', f='FA', g='GO', h='HI', i='K
 
 
 def enc(name):
-    """a bundle name in the two-letter code: "licence3" -> NNK0C4EZRAC4EZAF"""
     return ''.join(CODE[c] for c in name)
 
 
@@ -66,14 +24,8 @@ def lic_name(n):
     return enc('licence%d' % n) + '.ba3'
 
 
-# License.bin (the bundle's one-letter code: ElciNFi.TlN), read by 0x2759ec into the licence manager +0x240:
-# per class (C B A S) 6 words, u8 n, n test ids -- the tests the class shows, in that order (0x27481c: class,
-# index -> id -> the test, found by id).  The free build's class C is ids 0 1 3.
 CLASSES = 'ElciNFi.TlN'
-# Premium's order (Full Lap 1 at the end).  The save keeps a test's medal by its place in the class, not its id
-# (this order showed a save's Full Lap 1 gold on Cornering 2): host/games/gtracing/features/licences.c keeps the
-# medals at the free build's places.
-CLASS_C = [0, 1, 2, 5, 4, 3]     # Braking 1, Cornering 1, Cornering 2, Overtaking 1, Braking 2, Full Lap 1
+CLASS_C = [0, 1, 2, 5, 4, 3]
 
 
 def classes_parse(b):
@@ -91,10 +43,7 @@ def classes_build(classes):
     return b + b'\0' * (-len(b) % 32 or 8)
 
 
-# licence files
-
 def lic_parse(b):
-    """[record, text pack per language]"""
     n = struct.unpack_from('<I', b)[0]
     k, ends = 6, []
     for _ in range(n - 1):
@@ -136,7 +85,6 @@ def text_sec(t):
 
 
 def strings(t):
-    """the text pack's header and its strings (title, description): utf-16 after 20 bytes"""
     return t[:20], t[20:].decode('utf-16-le').split('\0')
 
 
@@ -145,7 +93,6 @@ def title(t):
 
 
 def renumber(t, num):
-    """the title's number made num (same length: one digit for one digit)"""
     h, s = strings(t)
     m = re.findall(r'\d+', s[0])
     if len(m) != 1 or len(m[0]) != len(str(num)):
@@ -162,7 +109,6 @@ def rec_fields(r):
 
 
 def rec_to_free(r, tid, rewards):
-    """a premium record as the free build has it: id, the type + 1, the 22 reward bytes after the times"""
     _, _, typ, after = rec_fields(r)
     r = bytearray(r)
     struct.pack_into('<I', r, 0, tid)
@@ -171,7 +117,6 @@ def rec_to_free(r, tid, rewards):
 
 
 def learn_fixes(pairs):
-    """per language: the utf-16 units the free build changed in the premium texts (same-length strings)"""
     seen = {}
     for p, f in pairs:
         for lang in range(6):
@@ -180,9 +125,8 @@ def learn_fixes(pairs):
                 continue
             for k in range(20, len(a) - 1, 2):
                 u, v = a[k:k + 2], b[k:k + 2]
-                if u != v and not (u[1] == 0 and chr(u[0]).isdigit()):     # not the renumbered titles
+                if u != v and not (u[1] == 0 and chr(u[0]).isdigit()):
                     seen.setdefault(lang, {}).setdefault(u, set()).add(v)
-    # a unit made into one other unit everywhere it changed
     return {lang: {u: next(iter(v)) for u, v in m.items() if len(v) == 1} for lang, m in seen.items()}
 
 
@@ -208,18 +152,15 @@ def licences(prem, free, out):
             F[n] = lic_parse(open(p, 'rb').read())
     if len(P) != 24 or sorted(F) != [1, 2, 4] + list(range(7, 25)):
         raise ValueError('licences: premium %d files, free %s' % (len(P), sorted(F)))
-    for d, n in [(prem, k) for k in P] + [(free, k) for k in F]:     # the file layout as read here
+    for d, n in [(prem, k) for k in P] + [(free, k) for k in F]:
         b = open(os.path.join(d, lic_name(n)), 'rb').read()
         if lic_build(lic_parse(b)) != b:
             raise ValueError('%s: the licence layout does not hold' % lic_name(n))
     p_by_id = {rec_fields(s[0])[0]: s for s in P.values()}
-    # the free tests and their premium twin (same id; free id 3 = premium id 5, Full Lap 1)
     twin = {}
     for n, s in F.items():
         tid = rec_fields(s[0])[0]
         twin[n] = p_by_id[5 if tid == 3 else tid]
-    # check the record rule on every test both builds have (the medal times may differ: the free build eased
-    # some, Braking 1 and Cornering 1)
     eased = []
     for n, s in F.items():
         r = s[0]
@@ -247,8 +188,6 @@ def licences(prem, free, out):
     by_id = {rec_fields(s[0])[0]: n for n, s in F.items()}
 
     def rewards(tid, like):
-        """the three medal words of the free test of the same type; the fourth (rising with the id) between
-        the free ids around it; the fifth the smaller of theirs"""
         lo = max(i for i in by_id if i < tid)
         hi = min(i for i in by_id if i > tid)
         wl, wh = reward_words(by_id[lo]), reward_words(by_id[hi])
@@ -260,7 +199,6 @@ def licences(prem, free, out):
     os.makedirs(odir, exist_ok=True)
     for f in os.listdir(odir):
         os.remove(os.path.join(odir, f))
-    # (file here, premium id, id here, free test whose other-language texts / rewards it takes, or None: English)
     new = [(3, 2, 2, 2, 2), (5, 4, 4, 1, 8), (6, 3, 5, None, 10)]
     for n, pid, tid, text_from, rew_from in new:
         p = p_by_id[pid]
@@ -275,7 +213,6 @@ def licences(prem, free, out):
                 secs.append(secs[1])
         open(os.path.join(odir, lic_name(n)), 'wb').write(lic_build(secs))
         print('licence%d: %s (id %d, track %d)' % (n, title(text(p[1])), tid, rec_fields(p[0])[1]))
-    # the class lists: class C shows the six tests, in premium's order
     cls_path = os.path.join(free, CLASSES)
     cb = open(cls_path, 'rb').read()
     classes, rest = classes_parse(cb)
@@ -286,7 +223,6 @@ def licences(prem, free, out):
     classes[0] = (classes[0][0], CLASS_C)
     open(os.path.join(odir, CLASSES), 'wb').write(classes_build(classes))
     print('%s: class C tests %s (ids)' % (CLASSES, CLASS_C))
-    # the free tests back to premium's numbers
     for n, s in sorted(F.items()):
         want = int(re.findall(r'\d+', title(text(twin[n][1])))[0])
         have = int(re.findall(r'\d+', title(text(s[1])))[0])
@@ -297,8 +233,6 @@ def licences(prem, free, out):
         print('licence%d: %s -> %d' % (n, title(text(s[1])), want))
     return 0
 
-
-# audio
 
 def wav_rate(path):
     with open(path, 'rb') as f:
@@ -317,7 +251,7 @@ def audio(prem, free, out):
             continue
         src = os.path.join(prem, f)
         a, b = wav_rate(src), wav_rate(os.path.join(free, f))
-        if a is None or b is None or a <= b:          # the same rate in both builds: the free one stays
+        if a is None or b is None or a <= b:
             continue
         dst = os.path.join(odir, f)
         if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(src):

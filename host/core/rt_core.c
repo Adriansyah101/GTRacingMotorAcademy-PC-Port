@@ -1,28 +1,24 @@
-/* rt_core.c -- threads, calls between the host and the recompiled game, traps, logging. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "rt.h"
 
 typedef struct { u32 addr; void (*fn)(CPU *); } DispatchEntry;
-extern const DispatchEntry rt_dispatch[];          /* build/gen/dispatch.c, sorted by address */
+extern const DispatchEntry rt_dispatch[];
 extern const unsigned rt_dispatch_count;
 
-__attribute__((noreturn)) void rt_longjmp_host(void **jb);   /* runtime/rt_jump.c (clang) */
-
-/* logging */
+__attribute__((noreturn)) void rt_longjmp_host(void **jb);
 
 static FILE *logf;
 static CRITICAL_SECTION log_lock;
 static int log_ready;
-static int log_off;             /* set by rt_log_open only, before any other thread runs: read without the lock */
+static int log_off;
 #if GT_DEV
 int rt_trace;
 #endif
 
-/* path: the log file; "0" (GT_LOG=0) writes no log at all, neither the file nor the console */
 void rt_log_open(const char *path)
 {
     if (!log_ready) {
@@ -37,8 +33,6 @@ void rt_log_open(const char *path)
 
 int rt_log_enabled(void) { return !log_off; }
 
-/* Each line with the folders it names written as their tags (scrub.c, CRASH_DUMP): the log goes
-   with a bug report. */
 size_t rt_scrub(char *s, size_t n);
 
 int rt_vlog(const char *fmt, va_list ap)
@@ -70,9 +64,7 @@ int rt_vlog(const char *fmt, va_list ap)
         fflush(logf);
     }
     LeaveCriticalSection(&log_lock);
-    /* the line is gone from memory once written: a crash dump holds this thread's stack, and the tail of a long
-       line (past what rt_scrub shortened) would otherwise stay in it */
-    SecureZeroMemory(p, (size_t)n + 1);   /* n < sizeof buf when p is buf */
+    SecureZeroMemory(p, (size_t)n + 1);
     if (p != buf)
         free(p);
     return len;
@@ -86,10 +78,9 @@ void rt_log(const char *fmt, ...)
     va_end(ap);
 }
 
-/* The log's line, the crash dump and the box (crashdump.c), then the end. */
 void rt_fatal(const char *fmt, ...)
 {
-    static char why[1024];              /* static: the box shows it after this frame is gone */
+    static char why[1024];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(why, sizeof why, fmt, ap);
@@ -97,12 +88,10 @@ void rt_fatal(const char *fmt, ...)
     gt_crash(3, why);
 }
 
-/* threads */
-
 static __thread RtThread *cur;
 static volatile LONG next_id;
 
-#define STACK_SLACK 0x10000u       /* above the guest stack top: variadic reads past the args */
+#define STACK_SLACK 0x10000u
 
 RtThread *rt_thread_new(u32 stack_size)
 {
@@ -145,15 +134,6 @@ void rt_thread_end(void)
     free(t);
 }
 
-/* guest functions */
-
-/* FAST_DISPATCH (port addition, optimisation pass 3): a game address to its recompiled function.  A binary
-   search over the 23,873 functions takes about 15 steps through a 190 KB table on every indirect call, message
-   send and host call into the game (measured: rt_lookup was the render thread's busiest host function in a race,
-   1.6 %).  So a table over __text in 64-byte buckets (about 100,000 of them, 0.4 MB) gives
-   the first function at or after each bucket's start, and the few functions inside a bucket are stepped through.
-   One table entry per 2-byte address would take 12.4 MB for the same answer.  Built
-   once before main; addresses outside the table take the binary search. */
 #define LK_SHIFT 6
 static u32 *lk_first, lk_base, lk_buckets;
 
@@ -198,8 +178,6 @@ void (*rt_lookup(u32 addr))(CPU *)
     return NULL;
 }
 
-/* host function addresses */
-
 static RtBridge hostfn[GT_HOSTFN_SIZE / 4];
 static const char *hostfn_name[GT_HOSTFN_SIZE / 4];
 static unsigned nhostfn;
@@ -227,7 +205,7 @@ u32 rt_host_addr(RtBridge fn, const char *what)
     return a;
 }
 
-extern RtBridge gt_import_fn[];            /* loader.c: by (address - GT_IMPORT_BASE) / 4 */
+extern RtBridge gt_import_fn[];
 extern const char *gt_import_name[];
 extern unsigned gt_import_count;
 
@@ -260,7 +238,7 @@ void rt_call_indirect(CPU *c, u32 target)
     }
     void (*fn)(CPU *) = rt_lookup(a);
     if (!fn)
-        fn = rt_lookup(a ^ 1);             /* mode bit missing or extra */
+        fn = rt_lookup(a ^ 1);
     if (!fn)
         rt_fatal("call to 0x%08x: not a function (from return address 0x%08x)", target, c->r[14]);
     fn(c);
@@ -303,8 +281,6 @@ u32 rt_call4(u32 fn, u32 a, u32 b, u32 c3, u32 d)
     return rt_guest_call(rt_cpu(), fn, 4, v);
 }
 
-/* traps */
-
 static const char *trap_name(int k)
 {
     switch (k) {
@@ -334,8 +310,6 @@ void rt_missing_import(CPU *c, const char *name)
              name, c->r[14]);
 }
 
-/* SjLj host frames */
-
 void rt_frame_push(CPU *c, RtFrame *f)
 {
     RtThread *t = c->rt;
@@ -351,8 +325,6 @@ void rt_frame_pop(CPU *c, RtFrame *f)
     t->top = f->prev;
 }
 
-/* Resume guest function context fc at its landing pad (the unwinder, imp_unwind.c): the host
-   frame that registered it is found on the list; frames above it are dropped. */
 __attribute__((noreturn)) void rt_resume_context(CPU *c, u32 fc)
 {
     RtThread *t = c->rt;
@@ -362,14 +334,11 @@ __attribute__((noreturn)) void rt_resume_context(CPU *c, u32 fc)
     if (!f)
         rt_fatal("SjLj resume: no host frame registered function context 0x%08x", fc);
     t->top = f;
-    /* jbuf: [0] fp (r7), [1] resume address, [2] sp */
     c->r[7] = rd32(fc + 0x20);
     c->resume_pc = rd32(fc + 0x24);
     c->r[13] = rd32(fc + 0x28);
     rt_longjmp_host(f->jb);
 }
-
-/* guest setjmp / longjmp */
 
 void **rt_setjmp_prepare(CPU *c, u32 guest_buf, int sig)
 {
@@ -408,6 +377,5 @@ static __attribute__((noreturn)) void rt_guest_longjmp(CPU *c, u32 guest_buf, u3
     rt_longjmp_host(j->jb);
 }
 
-/* the imports: longjmp(buf, val), siglongjmp(buf, val) -- the signal mask is not kept */
 void I_longjmp(CPU *c) { rt_guest_longjmp(c, c->r[0], c->r[1]); }
 void I_siglongjmp(CPU *c) { rt_guest_longjmp(c, c->r[0], c->r[1]); }

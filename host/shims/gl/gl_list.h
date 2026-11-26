@@ -1,49 +1,41 @@
-/* gl_list.h -- the desktop OpenGL entry points the host uses (gles.c loads them, eagl.c draws with
-   some).  Integers, enums and pointers are all 32-bit words on this host, so they are written u32;
-   APIENTRY (stdcall) is in the pointer types.
-
-   GLP(name, params, args)        void, passed through as the game's h_<name>
-   GLR(ret, name, params, args)   returns a value, passed through
-   GLX(ret, name, params)         loaded only: gles.c writes h_<name> itself, or the host uses it */
 #ifndef GLX
 #define GLX(ret, name, params)
 #endif
 
-/* straight from OpenGL ES 1.1 / 2.0 to desktop OpenGL 2.1 (compatibility) */
-GLX(void, glActiveTexture, (u32 a))                    /* STATE_CACHE (gles.c) */
+GLX(void, glActiveTexture, (u32 a))
 GLP(glAlphaFunc, (u32 a, float b), (a, b))
 GLP(glAttachShader, (u32 a, u32 b), (a, b))
-GLX(void, glBindRenderbuffer, (u32 a, u32 b))          /* QUERY_FREE (gles.c) */
-GLX(void, glBindTexture, (u32 a, u32 b))               /* STATE_CACHE */
-GLX(void, glBlendFunc, (u32 a, u32 b))                 /* STATE_CACHE */
-GLX(void, glBlendFuncSeparate, (u32 a, u32 b, u32 c_, u32 d))   /* STATE_CACHE */
+GLX(void, glBindRenderbuffer, (u32 a, u32 b))
+GLX(void, glBindTexture, (u32 a, u32 b))
+GLX(void, glBlendFunc, (u32 a, u32 b))
+GLX(void, glBlendFuncSeparate, (u32 a, u32 b, u32 c_, u32 d))
 GLP(glBufferData, (u32 a, u32 b, u32 c_, u32 d), (a, b, c_, d))
 GLR(u32, glCheckFramebufferStatus, (u32 a), (a))
 GLP(glClear, (u32 a), (a))
-GLX(void, glClearColor, (float a, float b, float c_, float d))   /* QUERY_FREE */
+GLX(void, glClearColor, (float a, float b, float c_, float d))
 GLP(glClearStencil, (u32 a), (a))
 GLP(glClientActiveTexture, (u32 a), (a))
 GLP(glColor4f, (float a, float b, float c_, float d), (a, b, c_, d))
 GLP(glColor4ub, (u32 a, u32 b, u32 c_, u32 d), (a, b, c_, d))
-GLX(void, glColorMask, (u32 a, u32 b, u32 c_, u32 d))   /* STATE_CACHE */
+GLX(void, glColorMask, (u32 a, u32 b, u32 c_, u32 d))
 GLP(glColorPointer, (u32 a, u32 b, u32 c_, u32 d), (a, b, c_, d))
 GLR(u32, glCreateProgram, (void), ())
 GLR(u32, glCreateShader, (u32 a), (a))
 GLP(glCullFace, (u32 a), (a))
-GLX(void, glDeleteProgram, (u32 a))                    /* STATE_CACHE */
+GLX(void, glDeleteProgram, (u32 a))
 GLP(glDeleteShader, (u32 a), (a))
-GLX(void, glDeleteTextures, (u32 a, u32 b))            /* STATE_CACHE */
+GLX(void, glDeleteTextures, (u32 a, u32 b))
 GLP(glDepthFunc, (u32 a), (a))
-GLX(void, glDepthMask, (u32 a))                        /* STATE_CACHE */
-GLX(void, glDisable, (u32 a))                          /* STATE_CACHE */
-GLX(void, glDisableClientState, (u32 a))               /* ARRAY_CACHE (gles.c) */
-GLX(void, glEnable, (u32 a))                           /* STATE_CACHE */
-GLX(void, glEnableClientState, (u32 a))                /* ARRAY_CACHE (gles.c) */
+GLX(void, glDepthMask, (u32 a))
+GLX(void, glDisable, (u32 a))
+GLX(void, glDisableClientState, (u32 a))
+GLX(void, glEnable, (u32 a))
+GLX(void, glEnableClientState, (u32 a))
 GLP(glFlush, (void), ())
 GLP(glFogf, (u32 a, float b), (a, b))
 GLP(glFogfv, (u32 a, u32 b), (a, b))
 GLP(glFrontFace, (u32 a), (a))
-GLX(void, glGenBuffers, (u32 a, u32 b))                /* STATE_CACHE: a new name may be an old one */
+GLX(void, glGenBuffers, (u32 a, u32 b))
 GLP(glGenFramebuffers, (u32 a, u32 b), (a, b))
 GLP(glGenRenderbuffers, (u32 a, u32 b), (a, b))
 GLP(glGenTextures, (u32 a, u32 b), (a, b))
@@ -74,7 +66,7 @@ GLP(glPointSize, (float a), (a))
 GLP(glPopMatrix, (void), ())
 GLP(glPushMatrix, (void), ())
 GLP(glRotatef, (float a, float b, float c_, float d), (a, b, c_, d))
-GLX(void, glScissor, (u32 a, u32 b, u32 c_, u32 d))   /* QUERY_FREE */
+GLX(void, glScissor, (u32 a, u32 b, u32 c_, u32 d))
 GLP(glStencilFunc, (u32 a, u32 b, u32 c_), (a, b, c_))
 GLP(glStencilMask, (u32 a), (a))
 GLP(glStencilOp, (u32 a, u32 b, u32 c_), (a, b, c_))
@@ -83,7 +75,6 @@ GLP(glTexEnvf, (u32 a, u32 b, float c_), (a, b, c_))
 GLP(glTexEnvfv, (u32 a, u32 b, u32 c_), (a, b, c_))
 GLP(glTexEnvi, (u32 a, u32 b, u32 c_), (a, b, c_))
 GLP(glTexSubImage2D, (u32 a, u32 b, u32 c_, u32 d, u32 e, u32 f, u32 g, u32 h, u32 i), (a, b, c_, d, e, f, g, h, i))
-/* the uniforms: STATE_CACHE (gles.c, UNI_* below) */
 GLX(void, glUniform1f, (u32 a, float b))
 GLX(void, glUniform1fv, (u32 a, u32 b, u32 c_))
 GLX(void, glUniform1i, (u32 a, u32 b))
@@ -103,10 +94,9 @@ GLX(void, glUniform4iv, (u32 a, u32 b, u32 c_))
 GLX(void, glUniformMatrix2fv, (u32 a, u32 b, u32 c_, u32 d))
 GLX(void, glUniformMatrix3fv, (u32 a, u32 b, u32 c_, u32 d))
 GLX(void, glUniformMatrix4fv, (u32 a, u32 b, u32 c_, u32 d))
-GLX(void, glUseProgram, (u32 a))                       /* STATE_CACHE */
+GLX(void, glUseProgram, (u32 a))
 GLP(glViewport, (u32 a, u32 b, u32 c_, u32 d), (a, b, c_, d))
 
-/* the game's that need work (gles.c), and what the host itself draws with */
 GLX(void, glBindAttribLocation, (u32 a, u32 b, u32 c_))
 GLX(void, glClearDepth, (double a))
 GLX(void, glCompileShader, (u32 a))
@@ -142,7 +132,6 @@ GLX(void, glBlitFramebuffer, (u32 a, u32 b, u32 c_, u32 d, u32 e, u32 f, u32 g, 
 GLX(void, glGetShaderSource, (u32 a, u32 b, u32 c_, u32 d))
 GLX(void, glFinish, (void))
 
-/* glenhance.c: MSAA and anisotropic filtering */
 GLX(void, glBindFramebuffer, (u32 a, u32 b))
 GLX(void, glFramebufferRenderbuffer, (u32 a, u32 b, u32 c_, u32 d))
 GLX(void, glFramebufferTexture2D, (u32 a, u32 b, u32 c_, u32 d, u32 e))
@@ -151,6 +140,7 @@ GLX(void, glGetFramebufferAttachmentParameteriv, (u32 a, u32 b, u32 c_, u32 d))
 GLX(void, glReadPixels, (u32 a, u32 b, u32 c_, u32 d, u32 e, u32 f, u32 g))
 GLX(void, glTexParameterf, (u32 a, u32 b, float c_))
 GLX(void, glTexParameteri, (u32 a, u32 b, u32 c_))
+GLX(void, glGetTexParameteriv, (u32 a, u32 b, u32 c_))
 GLX(void, glRenderbufferStorageMultisample, (u32 a, u32 b, u32 c_, u32 d, u32 e))
 GLX(u32, glIsTexture, (u32 a))
 

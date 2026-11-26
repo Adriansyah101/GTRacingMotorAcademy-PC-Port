@@ -1,16 +1,3 @@
-/* imp_unwind.c -- C++ and Objective-C exceptions: the SjLj unwinder, the personality routine and
-   the __cxa_* / objc_*catch* support the game imports.
-
-   The game was built with setjmp/longjmp exceptions (armv7 iOS).  A function with handlers keeps
-   a function context on its stack and registers it:
-       fc+0x00 prev   fc+0x04 call_site   fc+0x08 data[4] (exception, selector)
-       fc+0x18 personality   fc+0x1c lsda   fc+0x20 jbuf: fp (r7), resume address, sp
-   Throwing walks the registered contexts (search, then cleanup/handler phase as libgcc does);
-   resuming one sets call_site to the landing pad's index and jumps back into the recompiled
-   function's host frame (rt_resume_context), whose dispatch code then switches on call_site.
-
-   The exception header is GCC's __cxa_exception (72 bytes on 32-bit ARM, the _Unwind_Exception at
-   +48), the thrown object right after it. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,9 +15,8 @@ enum { X_TYPE = 0, X_DTOR = 4, X_NEXT = 16, X_HANDLERS = 20, X_SWITCH = 24, X_AD
 #define HDR_OF_OBJ(o) ((o) - HDR_SIZE)
 #define HDR_OF_UE(u) ((u) - UE_OFF)
 
-/* Typeinfo kinds: the vtable addresses the loader binds (__ZTVN10__cxxabiv1...), +8. */
 static u32 vt_class[4], vt_si[4], vt_vmi[4];
-static u32 objc_marker;        /* exceptionType of an Objective-C exception */
+static u32 objc_marker;
 
 typedef struct { u32 vptr, name; } TypeInfo;
 typedef struct { u32 vptr, name, base; } SiTypeInfo;
@@ -56,8 +42,6 @@ u32 cxx_data_import(const char *name)
     return 0;
 }
 
-/* function contexts */
-
 void h_Unwind_SjLj_Register(CPU *c, u32 fc)
 {
     RtThread *t = c->rt;
@@ -73,8 +57,6 @@ void h_Unwind_SjLj_Unregister(CPU *c, u32 fc)
     RtThread *t = c->rt;
     t->sjlj_head = rd32(fc);
 }
-
-/* LSDA */
 
 static u32 uleb(u32 *p)
 {
@@ -131,8 +113,6 @@ static u32 read_enc(u32 *p, u8 enc)
     return v;
 }
 
-/* type matching */
-
 static int same_type(u32 a, u32 b)
 {
     if (a == b)
@@ -143,7 +123,6 @@ static int same_type(u32 a, u32 b)
     return !strcmp(na, nb);
 }
 
-/* Can a handler for catch_ti take an object of thrown_ti at *obj (adjusted to the base)? */
 static int can_catch(u32 catch_ti, u32 thrown_ti, u32 *obj)
 {
     if (same_type(catch_ti, thrown_ti))
@@ -156,7 +135,7 @@ static int can_catch(u32 catch_ti, u32 thrown_ti, u32 *obj)
         for (u32 i = 0; i < n; i++) {
             u32 base = rd32(thrown_ti + 16 + 8 * i), of = rd32(thrown_ti + 20 + 8 * i);
             if (!(of & 2))
-                continue;                  /* not public */
+                continue;
             s32 off = (s32)of >> 8;
             u32 p = *obj;
             if (of & 1)
@@ -173,8 +152,6 @@ static int can_catch(u32 catch_ti, u32 thrown_ti, u32 *obj)
 
 static u32 eh_vtable_objc(void);
 
-/* Does the action chain at `action` (1-based offset into the action table) catch the
-   exception?  Returns the selector (> 0 catch, 0 cleanup only, -1 nothing). */
 static s32 match_actions(u32 action_table, u32 ttype_base, u8 ttype_enc, u32 action, u32 hdr, int *cleanup)
 {
     u32 a = action_table + action - 1;
@@ -189,7 +166,7 @@ static s32 match_actions(u32 action_table, u32 ttype_base, u8 ttype_enc, u32 act
             u32 ti = read_enc(&tp, ttype_enc);
             u32 type = rd32(hdr + X_TYPE);
             if (!ti)
-                return filter;             /* catch (...) */
+                return filter;
             if (type == GA(&objc_marker)) {
                 if (rd32(ti) == eh_vtable_objc() && objc_ehtype_matches(ti, rd32(OBJ(hdr))))
                     return filter;
@@ -209,8 +186,6 @@ static s32 match_actions(u32 action_table, u32 ttype_base, u8 ttype_enc, u32 act
     }
 }
 
-/* What the function context fc does with the exception: -1 nothing, 0 cleanup, >0 handler.
-   *lp is the landing pad index for call_site. */
 static s32 personality(u32 fc, u32 hdr, u32 *lp)
 {
     s32 cs = (s32)rd32(fc + 4);
@@ -228,7 +203,7 @@ static s32 personality(u32 fc, u32 hdr, u32 *lp)
         u32 off = uleb(&p);
         ttype_base = p + off;
     }
-    p++;                                    /* call-site encoding: uleb128 for SjLj */
+    p++;
     u32 cs_len = uleb(&p), cs_table = p, action_table = cs_table + cs_len;
     u32 lpi = 0, action = 0;
     for (s32 i = 0; i < cs; i++) {
@@ -237,12 +212,10 @@ static s32 personality(u32 fc, u32 hdr, u32 *lp)
     }
     *lp = lpi;
     if (!action)
-        return 0;                           /* cleanup only */
+        return 0;
     int cleanup;
     return match_actions(action_table, ttype_base, ttype_enc, action, hdr, &cleanup);
 }
-
-/* raising */
 
 static const char *type_name(u32 hdr)
 {
@@ -262,7 +235,6 @@ static __attribute__((noreturn)) void uncaught(CPU *c, u32 hdr)
     rt_fatal("uncaught C++ exception of type %s (return address 0x%08x)", type_name(hdr), c->r[14]);
 }
 
-/* Phase 2 from the current head: run cleanups, then the handler found in phase 1. */
 static __attribute__((noreturn)) void unwind_phase2(CPU *c, u32 hdr)
 {
     RtThread *t = c->rt;
@@ -297,8 +269,6 @@ static __attribute__((noreturn)) void raise(CPU *c, u32 hdr)
 }
 
 void h_Unwind_SjLj_Resume(CPU *c, u32 ue) { unwind_phase2(c, HDR_OF_UE(ue)); }
-
-/* the C++ ABI */
 
 u32 h_cxa_allocate_exception(u32 size)
 {
@@ -348,7 +318,7 @@ void h_cxa_end_catch(CPU *c)
     if (!h)
         return;
     s32 n = (s32)rd32(h + X_HANDLERS);
-    if (n < 0) {                            /* rethrown: still alive */
+    if (n < 0) {
         n++;
         wr32(h + X_HANDLERS, (u32)n);
         if (!n)
@@ -382,8 +352,6 @@ void h_cxa_call_unexpected(CPU *c, u32 ue)
              c->r[14]);
 }
 
-/* Objective-C exceptions */
-
 u32 objc_ehtype_vtable(void);
 static u32 eh_vtable_objc(void) { return objc_ehtype_vtable(); }
 
@@ -404,13 +372,10 @@ u32 h_objc_begin_catch(CPU *c, u32 ue) { return h_cxa_begin_catch(c, ue); }
 void h_objc_end_catch(CPU *c) { h_cxa_end_catch(c); }
 void h_objc_exception_rethrow(CPU *c) { h_cxa_rethrow(c); }
 
-/* std::__throw_*: the game does not catch these; stop with the reason. */
 void h_ZSt17__throw_bad_allocv(CPU *c) { rt_fatal("std::bad_alloc (return address 0x%08x)", c->r[14]); }
 void h_ZSt19__throw_logic_errorPKc(CPU *c, u32 m) { (void)c; rt_fatal("std::logic_error: %s", (const char *)GP(m)); }
 void h_ZSt20__throw_length_errorPKc(CPU *c, u32 m) { (void)c; rt_fatal("std::length_error: %s", (const char *)GP(m)); }
 void h_ZSt20__throw_out_of_rangePKc(CPU *c, u32 m) { (void)c; rt_fatal("std::out_of_range: %s", (const char *)GP(m)); }
-
-/* std::runtime_error { vptr; std::string msg; } */
 
 void h_ZNSsC1ERKSs(u32 self, u32 other);
 void h_ZNSsD1Ev(u32 self);

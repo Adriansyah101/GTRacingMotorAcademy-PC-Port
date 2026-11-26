@@ -1,19 +1,14 @@
-/* ns_misc.c -- paths and files, NSBundle, NSFileManager, NSUserDefaults, NSProcessInfo, notifications,
-   NSException, NSError, NSURL, NSLocale / NSTimeZone and the Foundation C functions.  Time and threads (NSDate,
-   timers, the run loop, NSThread, locks) are ns_runloop.c's.
-
-   The game sees iOS-like paths: its home is /var/mobile/Applications/GTRACING (Documents,
-   Library, tmp) with the .app inside it, as on the device.  gt_host_path maps them to the
-   host: the .app folder, and a "home" folder next to the program. */
+#ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "hmap.h"
 #include "ns.h"
@@ -23,12 +18,6 @@ const char *gt_guest_home = "/var/mobile/Applications/GTRACING";
 const char *gt_guest_bundle = "/var/mobile/Applications/GTRACING/" GT_GAME_NAME ".app";
 static char host_home[MAX_PATH], host_bundle[MAX_PATH], host_patch[MAX_PATH];
 
-/* Add-ons (port addition, HYUNDAI_CARS; an add-on folder as in the Gangstar port): each folder in add-on\ next to
-   the program holds bundle files, made by a
-   tool from a game the player has (tools\hyundai_addon.py: add-on\hyundai).  They are in the bundle's listing
-   (fm_contents) and read from there (gt_host_path), so the game finds them as its own: it makes its car table
-   from every .ba01 in the bundle and reads every .ba5 / .ba4 pack.  A bundle file of the same name is read
-   from the add-on instead (build\host\patch still first).  GT_ADDONS=0: none. */
 typedef struct {
     char name[96];
     char path[MAX_PATH * 2];
@@ -36,14 +25,7 @@ typedef struct {
 static AddonFile *addon_files;
 static int addon_count;
 
-/* FILE_INDEX (port addition, optimisation pass 3): an in-memory hash index of the files in patch\ and
-   add-on\, built at start: every bundle file the game opened was first looked
-   for in build\host\patch with GetFileAttributesA (a failed call to the file system for all but the six patched
-   menus), and its name compared with each add-on file in turn (_stricmp over about 150 names: premium-audio alone
-   has 121).  Both folders are now listed once at start into hash maps of lower-case names (Windows names ignore
-   case), so a lookup asks no one.  A file put into patch\ or add-on\ while the game runs is seen at the next
-   start, as add-ons already were. */
-static MapStr patch_idx, addon_idx;        /* "\sub\name" under patch\ -> 1; add-on file name -> its index + 1 */
+static MapStr patch_idx, addon_idx;
 
 static void lower_ascii(char *s)
 {
@@ -69,11 +51,10 @@ static void idx_put(MapStr *m, const char *key, u32 v)
     lower_ascii(k);
     ms_put(m, k, v);
 }
-/* the files under dir (rel = their path below the folder indexed, "" at the top), into patch_idx */
 static int patch_index_dir(const char *dir, const char *rel, int depth)
 {
     char pat[MAX_PATH * 2];
-    snprintf(pat, sizeof pat, "%s%s\\*", dir, rel);
+    snprintf(pat, sizeof pat, "%s%s" GT_SEP "*", dir, rel);
     WIN32_FIND_DATAA d;
     HANDLE h = FindFirstFileA(pat, &d);
     if (h == INVALID_HANDLE_VALUE)
@@ -83,7 +64,7 @@ static int patch_index_dir(const char *dir, const char *rel, int depth)
         if (!strcmp(d.cFileName, ".") || !strcmp(d.cFileName, ".."))
             continue;
         char sub[MAX_PATH * 2];
-        snprintf(sub, sizeof sub, "%s\\%s", rel, d.cFileName);
+        snprintf(sub, sizeof sub, "%s" GT_SEP "%s", rel, d.cFileName);
         if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (depth < 8)
                 n += patch_index_dir(dir, sub, depth + 1);
@@ -104,7 +85,7 @@ static void addons_init(const char *exe_dir)
         return;
     }
     char pat[MAX_PATH * 2];
-    snprintf(pat, sizeof pat, "%s\\add-on\\*", exe_dir);
+    snprintf(pat, sizeof pat, "%s" GT_SEP "add-on" GT_SEP "*", exe_dir);
     WIN32_FIND_DATAA d;
     HANDLE h = FindFirstFileA(pat, &d);
     if (h == INVALID_HANDLE_VALUE)
@@ -113,9 +94,9 @@ static void addons_init(const char *exe_dir)
         if (!(d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || d.cFileName[0] == '.')
             continue;
         char dir[MAX_PATH * 2], fpat[MAX_PATH * 2 + 4];
-        if (snprintf(dir, sizeof dir, "%s\\add-on\\%s", exe_dir, d.cFileName) >= (int)sizeof dir)
-            continue;                    /* a folder name too long for a Windows path */
-        snprintf(fpat, sizeof fpat, "%s\\*", dir);
+        if (snprintf(dir, sizeof dir, "%s" GT_SEP "add-on" GT_SEP "%s", exe_dir, d.cFileName) >= (int)sizeof dir)
+            continue;
+        snprintf(fpat, sizeof fpat, "%s" GT_SEP "*", dir);
         WIN32_FIND_DATAA f;
         HANDLE g = FindFirstFileA(fpat, &f);
         if (g == INVALID_HANDLE_VALUE)
@@ -128,14 +109,14 @@ static void addons_init(const char *exe_dir)
             if (strlen(dir) + 1 + strlen(f.cFileName) >= sizeof addon_files->path)
                 continue;
             if (idx_has(&addon_idx, f.cFileName, NULL)) {
-                rt_log("[addon] %s\\%s: another add-on has that file, not used\n", d.cFileName, f.cFileName);
+                rt_log("[addon] %s" GT_SEP "%s: another add-on has that file, not used\n", d.cFileName, f.cFileName);
                 continue;
             }
             addon_files = realloc(addon_files, sizeof *addon_files * (addon_count + 1));
             AddonFile *a = &addon_files[addon_count++];
             snprintf(a->name, sizeof a->name, "%s", f.cFileName);
-            snprintf(a->path, sizeof a->path, "%s\\%s", dir, f.cFileName);
-            idx_put(&addon_idx, a->name, (u32)addon_count);      /* index + 1 */
+            snprintf(a->path, sizeof a->path, "%s" GT_SEP "%s", dir, f.cFileName);
+            idx_put(&addon_idx, a->name, (u32)addon_count);
             n++;
         } while (FindNextFileA(g, &f));
         FindClose(g);
@@ -144,18 +125,15 @@ static void addons_init(const char *exe_dir)
     FindClose(h);
 }
 
-/* a file at the top of the bundle (host path) -> the add-on's copy, or NULL */
 static const char *addon_file(const char *host)
 {
     size_t bl = strlen(host_bundle);
-    if (!addon_count || !bl || _strnicmp(host, host_bundle, bl) || host[bl] != '\\' || strchr(host + bl + 1, '\\'))
+    if (!addon_count || !bl || _strnicmp(host, host_bundle, bl) || host[bl] != GT_SEPC || strchr(host + bl + 1, GT_SEPC))
         return NULL;
     u32 i;
     return idx_has(&addon_idx, host + bl + 1, &i) ? addon_files[i - 1].path : NULL;
 }
 u32 ns_main_thread_id;
-
-/* paths, files */
 
 static int prefix_of(const char *p, const char *pre)
 {
@@ -163,11 +141,8 @@ static int prefix_of(const char *p, const char *pre)
     return !strncmp(p, pre, n) && (p[n] == 0 || p[n] == '/');
 }
 
-/* The guest's working directory (chdir/getcwd): iOS starts apps in "/".  Relative paths are joined
-   to it here, so the host's own working directory never matters. */
 static char guest_cwd[1024] = "/";
 
-/* absolute, with "." and ".." resolved and no doubled slashes */
 static void guest_abs(const char *g, char *out, size_t n)
 {
     char tmp[2048];
@@ -236,14 +211,14 @@ const char *gt_host_path(const char *g0, char *buf, size_t n)
         snprintf(buf, n, "%s%s", host_home, g + strlen(gt_guest_home));
     else
         snprintf(buf, n, "%s", g);
+#ifdef _WIN32
     for (char *s = buf; *s; s++)
         if (*s == '/')
             *s = '\\';
-    /* a bundle file the build patched (build\host\patch: the menu SWF for PC_CONTROLS, pcctl.c) is read
-       from there instead; the game mostly opens bundle files by their host path (NSBundle gives it) */
+#endif
     size_t bl = strlen(host_bundle);
-    if (host_patch[0] && bl && !_strnicmp(buf, host_bundle, bl) && buf[bl] == '\\' &&
-        idx_has(&patch_idx, buf + bl, NULL)) {              /* FILE_INDEX: listed at start, no file system call */
+    if (host_patch[0] && bl && !_strnicmp(buf, host_bundle, bl) && buf[bl] == GT_SEPC &&
+        idx_has(&patch_idx, buf + bl, NULL)) {
         char p[MAX_PATH * 2];
         snprintf(p, sizeof p, "%s%s", host_patch, buf + bl);
         static int logs;
@@ -263,19 +238,19 @@ static void mkdir_host(const char *p) { CreateDirectoryA(p, NULL); }
 void gt_paths_init(const char *bundle, const char *exe_dir)
 {
     snprintf(host_bundle, sizeof host_bundle, "%s", bundle);
-    snprintf(host_home, sizeof host_home, "%s\\home", exe_dir);
-    const char *pc = getenv("GT_PC_CONTROLS");          /* =0: the original menu SWF (pcctl.c) */
+    snprintf(host_home, sizeof host_home, "%s" GT_SEP "home", exe_dir);
+    const char *pc = getenv("GT_PC_CONTROLS");
     if (!(pc && *pc == '0'))
-        snprintf(host_patch, sizeof host_patch, "%s\\patch", exe_dir);
-    if (getenv("GT_HOME") && *getenv("GT_HOME"))     /* testing: a copy of the save, not the player's own */
+        snprintf(host_patch, sizeof host_patch, "%s" GT_SEP "patch", exe_dir);
+    if (getenv("GT_HOME") && *getenv("GT_HOME"))
         snprintf(host_home, sizeof host_home, "%s", getenv("GT_HOME"));
     if (host_patch[0]) {
         int n = patch_index_dir(host_patch, "", 0);
         rt_log("[ns] patch folder: %d files indexed\n", n);
     }
     addons_init(exe_dir);
-    static const char *const sub[] = {"", "\\Documents", "\\Library", "\\Library\\Caches",
-                                      "\\Library\\Preferences", "\\tmp", NULL};
+    static const char *const sub[] = {"", GT_SEP "Documents", GT_SEP "Library", GT_SEP "Library" GT_SEP "Caches",
+                                      GT_SEP "Library" GT_SEP "Preferences", GT_SEP "tmp", NULL};
     for (int i = 0; sub[i]; i++) {
         char p[MAX_PATH * 2];
         snprintf(p, sizeof p, "%s%s", host_home, sub[i]);
@@ -343,13 +318,10 @@ u32 h_NSSearchPathForDirectoriesInDomains(u32 dir, u32 mask, u32 expand)
 }
 u32 h_NSHomeDirectory(void) { return ns_string(gt_guest_home); }
 
-/* small layouts, allocation */
-
 static void alloc16(CPU *c) { ret_i(c, ns_alloc(SELF, 16)); }
 static void alloc32(CPU *c) { ret_i(c, ns_alloc(SELF, 32)); }
 static void alloc64(CPU *c) { ret_i(c, ns_alloc(SELF, 64)); }
 
-/* the one object of a shared-instance class (made on the first ask, kept) */
 id ns_singleton(id *slot, const char *cls, u32 bytes)
 {
     if (!*slot) {
@@ -358,8 +330,6 @@ id ns_singleton(id *slot, const char *cls, u32 bytes)
     }
     return *slot;
 }
-
-/* NSBundle */
 
 typedef struct { u32 isa; u32 path, info, strings; } Bundle;
 #define BU(o) ((Bundle *)GP(o))
@@ -395,7 +365,6 @@ static void bu_identifier(CPU *c) { ret_i(c, ns_dict_get(bundle_info(), ns_strin
 
 static int exists(const char *g) { return attrs(g) != INVALID_FILE_ATTRIBUTES; }
 
-/* name[.type] in dir, then in en.lproj (or English.lproj) */
 static id find_resource(id name, id type, id dir)
 {
     const char *n = ns_utf8(name), *t = type ? ns_utf8(type) : "", *d = dir ? ns_utf8(dir) : "";
@@ -424,7 +393,6 @@ static void bu_URLForResource(CPU *c)
     ret_i(c, p ? msg1(ns_class("NSURL"), "fileURLWithPath:", p) : 0);
 }
 
-/* .strings: binary plist, XML plist or the old "key" = "value"; text (UTF-16 or UTF-8) */
 static void parse_strings(id dict, const char *s)
 {
     const char *p = s;
@@ -526,8 +494,6 @@ static void bu_preferredLocalizations(CPU *c)
     ret_i(c, objc_autorelease(ns_array_new(&s, 1)));
 }
 
-/* NSFileManager */
-
 static id file_manager;
 static void fm_default(CPU *c) { ret_i(c, ns_singleton(&file_manager, "NSFileManager", 8)); }
 
@@ -545,10 +511,10 @@ static int mkdirs(const char *g, int parents)
     if (!parents)
         return CreateDirectoryA(p, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
     for (char *s = p + 3; *s; s++)
-        if (*s == '\\') {
+        if (*s == GT_SEPC) {
             *s = 0;
             CreateDirectoryA(p, NULL);
-            *s = '\\';
+            *s = GT_SEPC;
         }
     CreateDirectoryA(p, NULL);
     DWORD a = GetFileAttributesA(p);
@@ -556,7 +522,6 @@ static int mkdirs(const char *g, int parents)
 }
 static void fm_createDir(CPU *c)
 {
-    /* createDirectoryAtPath:withIntermediateDirectories:attributes:error: / createDirectoryAtPath:attributes: */
     int full = c->r[1] == sel_get("createDirectoryAtPath:withIntermediateDirectories:attributes:error:");
     int ok = mkdirs(ns_utf8(ARG(0)), full && (u8)ARG(1));
     if (!ok && full && ARG(3))
@@ -571,7 +536,7 @@ static int remove_tree(const char *hp)
     if (!(a & FILE_ATTRIBUTE_DIRECTORY))
         return DeleteFileA(hp) != 0;
     char pat[MAX_PATH * 2];
-    snprintf(pat, sizeof pat, "%s\\*", hp);
+    snprintf(pat, sizeof pat, "%s" GT_SEP "*", hp);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pat, &fd);
     if (h != INVALID_HANDLE_VALUE) {
@@ -579,7 +544,7 @@ static int remove_tree(const char *hp)
             if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, ".."))
                 continue;
             char sub[MAX_PATH * 2];
-            snprintf(sub, sizeof sub, "%s\\%s", hp, fd.cFileName);
+            snprintf(sub, sizeof sub, "%s" GT_SEP "%s", hp, fd.cFileName);
             remove_tree(sub);
         } while (FindNextFileA(h, &fd));
         FindClose(h);
@@ -598,7 +563,7 @@ static void fm_contents(CPU *c)
 {
     char p[MAX_PATH * 2], pat[MAX_PATH * 2 + 4];
     gt_host_path(ns_utf8(ARG(0)), p, sizeof p);
-    snprintf(pat, sizeof pat, "%s\\*", p);
+    snprintf(pat, sizeof pat, "%s" GT_SEP "*", p);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -610,7 +575,7 @@ static void fm_contents(CPU *c)
     id a = ns_array_new(NULL, 0);
     char *seen = calloc(addon_count + 1, 1);
     size_t bl = strlen(host_bundle);
-    int bundle = bl && !_strnicmp(p, host_bundle, bl) && (!p[bl] || (p[bl] == '\\' && !p[bl + 1]));
+    int bundle = bl && !_strnicmp(p, host_bundle, bl) && (!p[bl] || (p[bl] == GT_SEPC && !p[bl + 1]));
     do {
         if (strcmp(fd.cFileName, ".") && strcmp(fd.cFileName, "..")) {
             ns_array_add(a, ns_string(fd.cFileName));
@@ -620,7 +585,6 @@ static void fm_contents(CPU *c)
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
-    /* the add-ons' files, as if in the bundle (a name the bundle has is listed once) */
     for (int i = 0; bundle && seen && i < addon_count; i++)
         if (!seen[i])
             ns_array_add(a, ns_string(addon_files[i].name));
@@ -705,8 +669,6 @@ static void fm_cwd(CPU *c) { ret_i(c, ns_string(guest_cwd)); }
 static void fm_isReadable(CPU *c) { ret_i(c, exists(ns_utf8(ARG(0)))); }
 static void fm_displayName(CPU *c) { ret_i(c, msg0(ARG(0), "lastPathComponent")); }
 
-/* NSUserDefaults */
-
 typedef struct { u32 isa; u32 values, registered, dirty; } Defaults;
 #define DF(o) ((Defaults *)GP(o))
 static id defaults_obj;
@@ -738,7 +700,6 @@ static id defaults(void)
         }
         DF(defaults_obj)->values = v ? v : ns_dict_new();
         DF(defaults_obj)->registered = ns_dict_new();
-        /* NSGlobalDomain, as an iPad has it: the language list and the locale (GT_LANG=fr picks French) */
         const char *lang = getenv("GT_LANG") ? getenv("GT_LANG") : "en";
         id l = ns_string(lang);
         id langs = ns_array_new(&l, 1);
@@ -766,7 +727,6 @@ static void ud_standard(CPU *c) { ret_i(c, defaults()); }
 static void ud_objectForKey(CPU *c) { ret_i(c, df_get(ARG(0))); }
 static void ud_typed(CPU *c)
 {
-    /* stringForKey: arrayForKey: dictionaryForKey: dataForKey: -- nil when of another kind */
     id v = df_get(ARG(0));
     const char *s = sel_name(c->r[1]);
     int ok = !v || (s[0] == 's' ? ns_is_string(v) : s[0] == 'a' ? ns_is_array(v) : s[0] == 'd' && s[1] == 'i' ? ns_is_dict(v) : ns_is_data(v));
@@ -818,8 +778,6 @@ static void ud_dictRep(CPU *c)
     ret_i(c, objc_autorelease(d));
 }
 
-/* NSProcessInfo */
-
 static id process_info;
 static void pi_info(CPU *c) { ret_i(c, ns_singleton(&process_info, "NSProcessInfo", 8)); }
 static void pi_name(CPU *c) { ret_i(c, ns_string(GT_GAME_NAME)); }
@@ -852,8 +810,6 @@ static void pi_pid(CPU *c) { ret_i(c, GetCurrentProcessId()); }
 static void pi_memory(CPU *c) { ret_l(c, 512ull << 20); }
 static void pi_cpus(CPU *c) { ret_i(c, 2); }
 static void pi_osString(CPU *c) { ret_i(c, ns_string("Version 4.3.3 (Build 8J2)")); }
-
-/* NSNotificationCenter */
 
 typedef struct { u32 isa; u32 name, object, info; } Note;
 #define NT(o) ((Note *)GP(o))
@@ -896,7 +852,6 @@ static void nt_dealloc(CPU *c)
 static void nc_default(CPU *c) { ret_i(c, ns_singleton(&note_center, "NSNotificationCenter", 8)); }
 static void nc_add(CPU *c)
 {
-    /* addObserver:selector:name:object: -- the observer is not retained (as in Cocoa) */
     Observer *o = calloc(1, sizeof *o);
     o->obs = ARG(0);
     o->sel = ARG(1);
@@ -911,7 +866,6 @@ static void nc_add(CPU *c)
 }
 static void nc_remove(CPU *c)
 {
-    /* removeObserver: / removeObserver:name:object: */
     int all = c->r[1] == sel_get("removeObserver:");
     id obs = ARG(0), name = all ? 0 : ARG(1), obj = all ? 0 : ARG(2);
     EnterCriticalSection(&note_lock);
@@ -958,8 +912,6 @@ void ns_post_notification(const char *name, id object)
     post(note_make(ns_string(name), object, 0));
 }
 
-/* NSException, NSError */
-
 void h_objc_exception_throw(CPU *c, u32 exc);
 
 typedef struct { u32 isa; u32 name, reason, info; } Exc;
@@ -982,7 +934,6 @@ static void ex_init(CPU *c)
 }
 static void ex_raiseFormat(CPU *c)
 {
-    /* +raise:format:, ... */
     u32 w[VA_WORDS];
     Buf b = {0};
     ns_format(&b, ns_utf8(ARG(1)), va_words(c, 4, w));
@@ -1009,7 +960,6 @@ static void ex_dealloc(CPU *c)
     objc_free_instance(SELF);
 }
 
-/* NSError {isa, domain, code, userInfo} (game subclasses were compiled against 20 bytes) */
 static void er_with(CPU *c)
 {
     id e = ns_alloc(SELF, 16);
@@ -1049,8 +999,6 @@ id ns_error(const char *domain, int code)
     W(e, 2) = (u32)code;
     return objc_autorelease(e);
 }
-
-/* NSURL */
 
 typedef struct { u32 isa; u32 str, file; } Url;
 #define UR(o) ((Url *)GP(o))
@@ -1092,7 +1040,6 @@ static void ur_initFile(CPU *c)
     UR(SELF)->file = 1;
 }
 static void ur_absolute(CPU *c) { ret_i(c, UR(SELF)->str); }
-/* scheme://host[:port]/path?query#fragment */
 static void url_parts(id u, const char **scheme_end, const char **host, const char **path)
 {
     const char *s = ns_utf8(UR(u)->str), *p = strstr(s, "://");
@@ -1167,8 +1114,6 @@ static void ur_dealloc(CPU *c)
     objc_free_instance(SELF);
 }
 
-/* NSLocale, NSTimeZone */
-
 static id locale_obj;
 static void lc_current(CPU *c) { ret_i(c, ns_singleton(&locale_obj, "NSLocale", 8)); }
 static void lc_init(CPU *c) { (void)c; }
@@ -1228,7 +1173,6 @@ static void tz_secs(CPU *c) { ret_i(c, (u32)((Tz *)GP(SELF))->secs); }
 static void tz_name(CPU *c) { ret_i(c, ((Tz *)GP(SELF))->name); }
 static void tz_known(CPU *c)
 {
-    /* the start of iOS 5's list (sorted, as it gives them) */
     static const char *const names[] = {
         "Africa/Abidjan", "Africa/Accra", "Africa/Addis_Ababa", "Africa/Algiers", "Africa/Asmara", "Africa/Bamako",
         "Africa/Bangui", "Africa/Banjul", "Africa/Bissau", "Africa/Blantyre", "Africa/Brazzaville", "Africa/Bujumbura",
@@ -1251,8 +1195,6 @@ static void tz_known(CPU *c)
     ret_i(c, objc_autorelease(a));
 }
 
-/* C functions */
-
 u32 h_NSClassFromString(u32 s) { return s ? objc_getClass_addr(ns_utf8(s)) : 0; }
 u32 h_NSStringFromClass(u32 cls) { return cls ? ns_string(objc_class_name(cls)) : 0; }
 u32 h_NSSelectorFromString(u32 s) { return s ? sel_get(ns_utf8(s)) : 0; }
@@ -1270,9 +1212,7 @@ u32 h_NSAllocateObject(u32 cls, u32 extra, u32 zone)
     return objc_alloc_instance(cls, extra);
 }
 
-/* registration */
-
-void ns_init_runloop(void);           /* ns_runloop.c */
+void ns_init_runloop(void);
 
 static void ns_init_misc(void)
 {

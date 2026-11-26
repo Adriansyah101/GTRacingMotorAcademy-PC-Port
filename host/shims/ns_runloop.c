@@ -1,18 +1,13 @@
-/* ns_runloop.c -- Foundation's time and threads for the game: NSDate, NSTimer, NSRunLoop and the performSelector
-   family (the run loop's queue of timers, delayed and cross-thread performs), NSThread, NSLock / NSRecursiveLock /
-   NSCondition / NSConditionLock.  Split from ns_misc.c (paths, bundles, files, defaults, notifications, URLs). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "hmap.h"
 #include "ns.h"
 #include "ns_internal.h"
-
-/* NSDate */
 
 typedef struct { u32 isa, pad; double t; } Date;
 static u32 cls_date;
@@ -25,12 +20,6 @@ double ns_now(void)
     return (double)v / 1e7 - 11644473600.0 - SINCE_1970;
 }
 
-/* PRECISE_WAIT (port addition, optimisation pass 1): sleeps
-   `seconds` on a high-resolution waitable timer (Windows 10 1803 and later: wakes within a fraction of a
-   millisecond, where Sleep wakes on the 1 ms tick and often a tick late).  Without it, the frame cap
-   (eagl.c) and the main loop (uikit.c) spin the last 0.5-1.5 ms of each wait in a loop of
-   SwitchToThread / run-loop polls, which a profile at 60 fps showed as ~11 % of the main thread spinning.
-   Without such a timer (older Windows), Sleep.  GT_PRECISE_WAIT=0: Sleep and the spins. */
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
@@ -63,7 +52,7 @@ void ns_wait(double seconds)
         return;
     }
     LARGE_INTEGER due;
-    due.QuadPart = -(LONGLONG)(seconds * 1e7);     /* relative, in 100 ns */
+    due.QuadPart = -(LONGLONG)(seconds * 1e7);
     if (!due.QuadPart)
         due.QuadPart = -1;
     if (SetWaitableTimerEx(timer, &due, 0, NULL, NULL, NULL, 0))
@@ -127,15 +116,13 @@ static void dt_description(CPU *c)
 }
 static void dt_copy(CPU *c) { ret_i(c, objc_retain(SELF)); }
 
-/* run loop queue: timers, delayed and cross-thread performs */
-
 typedef struct Sched {
-    u32 thread;                 /* host thread id whose run loop runs it */
+    u32 thread;
     double fire, interval;
-    u32 timer;                  /* NSTimer object (retained) or 0 */
-    u32 target, sel, arg;       /* performs: target/arg retained */
+    u32 timer;
+    u32 target, sel, arg;
     int repeats, done;
-    HANDLE event;               /* waitUntilDone */
+    HANDLE event;
     struct Sched *next;
 } Sched;
 
@@ -176,7 +163,6 @@ static void timer_fire(id t)
     }
 }
 
-/* Runs what is due on this thread's run loop; returns the seconds to the next item (or 1e9). */
 double ns_run_loop_once(void)
 {
     u32 me = GetCurrentThreadId();
@@ -238,14 +224,6 @@ double ns_run_loop_once(void)
     return next < 0 ? 0 : next;
 }
 
-/* Waits up to `seconds` running the loop (secondary threads' CFRunLoopRunInMode and friends). */
-/* PRECISE_RUNLOOP (port fix, found by the optimisation pass's benchmark): the game's render thread runs
-   CFRunLoopRunInMode(mode, 0.001) once a
-   frame (550 calls in 550 frames), a wait of at most 1 ms on the iPad.  Sleep(whole ms + 1) waits 2 to 2.5 ms on
-   Windows' 1 ms tick (measured with the cap off: 234 fps in the menus and 235 in a race, the render thread busy
-   only 40 % of the time), and so loses 1 to 1.5 ms of each 16.7 ms frame, which a slower PC needs to hold 60 fps.
-   A port fault (the iPad's wait is 1 ms).  So the wait is the precise timer's (PRECISE_WAIT; GT_PRECISE_WAIT=0
-   uses Sleep): 317 / 315 fps uncapped. */
 static void run_for(double seconds)
 {
     double end = ns_now() + seconds;
@@ -279,7 +257,6 @@ static void perform_later(u32 thread, double delay, id target, SEL sel, id arg, 
 
 static void tm_scheduled(CPU *c)
 {
-    /* scheduledTimerWithTimeInterval:(double)target:selector:userInfo:repeats: / timerWith... */
     id t = ns_alloc(cls_timer, sizeof(Timer));
     Timer *x = TM(t);
     x->interval = ARGD(0);
@@ -289,11 +266,6 @@ static void tm_scheduled(CPU *c)
     x->info = objc_retain(ARG(4));
     x->repeats = (u8)ARG(5);
     x->valid = 1;
-    /* Port fix: Gameloft's IGP ("G" button, -[FreemiumIGPViewController buttonPressed:]) covers the screen with a
-       UIWebView and gives the page 20 s (this timer, -targetMethod:) before it shows "no connection" and closes.
-       This port draws no UIKit views and loads no web pages, so for those 20 s the menu sat under an invisible
-       window that took every click and looked frozen. Firing the timer on the next run-loop turn takes the
-       game's own offline path (page not loaded -> alert -> quit IGP) at once. */
     if (!strcmp(sel_name(x->sel), "targetMethod:") && x->target &&
         !strcmp(objc_class_name(rd32(x->target)), "FreemiumIGPViewController")) {
         rt_log("[ui] Gameloft IGP page cannot load in this port: closing it now instead of after %.0f s\n", x->interval);
@@ -306,7 +278,6 @@ static void tm_scheduled(CPU *c)
 }
 static void tm_initWithFireDate(CPU *c)
 {
-    /* initWithFireDate:(id)interval:(double)target:selector:userInfo:repeats: */
     Timer *x = TM(SELF);
     x->fire = ns_date_value(ARG(0));
     x->interval = arg_d(c, 3);
@@ -349,7 +320,6 @@ static void tm_dealloc(CPU *c)
     objc_free_instance(SELF);
 }
 
-/* NSRunLoop: one object per thread is enough for the game (it adds timers and runs modes). */
 static id runloop_obj;
 static void rl_current(CPU *c) { ret_i(c, ns_singleton(&runloop_obj, "NSRunLoop", 16)); }
 static void rl_addTimer(CPU *c)
@@ -360,7 +330,6 @@ static void rl_addTimer(CPU *c)
 }
 static void rl_runMode(CPU *c)
 {
-    /* runMode:beforeDate: -- runs what is due, waiting until the date at most */
     double until = ns_date_value(ARG(1)), left = until - ns_now();
     double next = ns_run_loop_once();
     if (left > 0) {
@@ -384,18 +353,15 @@ u32 h_CFRunLoopRunInMode(u32 mode, u64 seconds, u32 once)
     (void)mode;
     (void)once;
     run_for(bits2d(seconds));
-    return 3;   /* kCFRunLoopRunTimedOut */
+    return 3;
 }
 
-/* performSelector variants on NSObject */
 static void o_performAfterDelay(CPU *c)
 {
-    /* performSelector:withObject:afterDelay:(double) */
     perform_later(GetCurrentThreadId(), arg_d(c, 4), SELF, ARG(0), ARG(1), 0);
 }
 static void o_performOnMain(CPU *c)
 {
-    /* performSelectorOnMainThread:withObject:waitUntilDone: */
     id self = SELF;
     SEL s = ARG(0);
     id arg = ARG(1);
@@ -409,9 +375,7 @@ static void o_performOnMain(CPU *c)
     }
     perform_later(ns_main_thread_id, 0, self, s, arg, wait);
 }
-/* [target sel:arg] on the main thread's run loop, later (dispatch_async to the main queue) */
 void ns_perform_main(id target, const char *sel, id arg) { perform_later(ns_main_thread_id, 0, target, sel_get(sel), arg, 0); }
-/* ... on this thread's run loop, after `delay` seconds */
 void ns_perform_here(id target, const char *sel, id arg, double delay)
 {
     perform_later(GetCurrentThreadId(), delay, target, sel_get(sel), arg, 0);
@@ -419,7 +383,6 @@ void ns_perform_here(id target, const char *sel, id arg, double delay)
 
 static void o_cancelPrevious(CPU *c)
 {
-    /* cancelPreviousPerformRequestsWithTarget:[selector:object:] (class method) */
     int all = c->r[1] == sel_get("cancelPreviousPerformRequestsWithTarget:");
     id target = ARG(0);
     SEL s = all ? 0 : ARG(1);
@@ -439,14 +402,12 @@ static void o_cancelPrevious(CPU *c)
     LeaveCriticalSection(&sched_lock);
 }
 
-/* threads */
-
 u32 h_pthread_create(u32 out, u32 attr, u32 start, u32 arg);
 
 typedef struct { u32 isa; u32 target, sel, arg, name, dict, started, finished, cancelled, tid; } Thr;
 #define TH(o) ((Thr *)GP(o))
 static u32 cls_thread;
-static Map32 thread_objs;      /* host thread id -> NSThread */
+static Map32 thread_objs;
 static CRITICAL_SECTION thread_lock;
 static id main_thread_obj;
 static volatile LONG live_threads;
@@ -514,7 +475,6 @@ static void th_isMain_c(CPU *c) { ret_i(c, GetCurrentThreadId() == ns_main_threa
 static void th_isMain_i(CPU *c) { ret_i(c, SELF == main_thread_obj); }
 static void th_detach(CPU *c)
 {
-    /* detachNewThreadSelector:toTarget:withObject: */
     id t = ns_alloc(cls_thread, sizeof(Thr));
     TH(t)->sel = ARG(0);
     TH(t)->target = objc_retain(ARG(1));
@@ -568,7 +528,6 @@ static void o_performInBackground(CPU *c)
 }
 static void o_performOnThread(CPU *c)
 {
-    /* performSelector:onThread:withObject:waitUntilDone: */
     id thr = ARG(1);
     u32 tid = thr && rd32(thr) == cls_thread && !TH(thr)->finished ? TH(thr)->tid : 0;
     if (!tid || tid == GetCurrentThreadId()) {
@@ -577,8 +536,6 @@ static void o_performOnThread(CPU *c)
     }
     perform_later(tid, 0, SELF, ARG(0), ARG(2), (u8)ARG(3));
 }
-
-/* locks */
 
 typedef struct { u32 isa; CRITICAL_SECTION *cs; CONDITION_VARIABLE *cv; u32 name; } Lock;
 #define LK(o) ((Lock *)GP(o))
@@ -649,8 +606,6 @@ static void lk_dealloc(CPU *c)
 }
 static void lk_setName(CPU *c) { set_copy(SELF, 3, ARG(0)); }
 static void lk_name(CPU *c) { ret_i(c, LK(SELF)->name); }
-
-/* registration */
 
 void ns_init_runloop(void)
 {

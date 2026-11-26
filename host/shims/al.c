@@ -1,9 +1,3 @@
-/* al.c -- the OpenAL the game uses (iOS's OpenAL 1.1 subset it imports), mixed by the host into one
-   SDL3 audio stream (44.1 kHz stereo float), and the AudioSession / AudioServices calls around it.
-
-   Sources play static buffers or queues of buffers (streaming), at a pitch, with a gain, looping or
-   not, placed in 3D: distance attenuation by the distance model, left/right by the listener's
-   orientation (mono buffers only, as OpenAL does).  Buffers are copied (alBufferDataStatic too). */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +27,8 @@ typedef struct {
     int used, state, looping, relative;
     float gain, pitch, pos[3], ref, max, rolloff, min_gain, max_gain;
     u32 queue[MAX_QUEUE];
-    int nq, cur, processed;     /* queue length, buffer playing, buffers done */
-    double at;                  /* frame position in the current buffer */
+    int nq, cur, processed;
+    double at;
 } Source;
 
 static Buffer buffers[MAX_BUFFERS];
@@ -52,8 +46,6 @@ static u32 device_cell = 0xA1D0, context_cell = 0xA1C0, current_ctx;
 static Source *src(u32 id) { return id && id <= MAX_SOURCES && sources[id - 1].used ? &sources[id - 1] : NULL; }
 static Buffer *buf(u32 id) { return id && id <= MAX_BUFFERS && buffers[id - 1].used ? &buffers[id - 1] : NULL; }
 
-/* mixing */
-
 static float attenuation(Source *s, float *pan)
 {
     *pan = 0;
@@ -62,7 +54,6 @@ static float attenuation(Source *s, float *pan)
         d[i] = s->relative ? s->pos[i] : s->pos[i] - lis_pos[i];
     float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     if (dist > 1e-4f) {
-        /* right = at x up */
         float r[3] = {lis_at[1] * lis_up[2] - lis_at[2] * lis_up[1], lis_at[2] * lis_up[0] - lis_at[0] * lis_up[2],
                       lis_at[0] * lis_up[1] - lis_at[1] * lis_up[0]};
         float rl = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
@@ -112,7 +103,7 @@ static void mix_source(Source *s, float *out, int n)
             return;
         }
         Buffer *b = buf(s->queue[s->cur]);
-        if (!b || !b->frames) {       /* nothing to play in it: done */
+        if (!b || !b->frames) {
             s->cur++;
             s->processed++;
             s->at = 0;
@@ -171,14 +162,14 @@ static void mix_source(Source *s, float *out, int n)
     }
 }
 
-#define MIX_FRAMES 4096                 /* frames mixed per pass of the device callback */
+#define MIX_FRAMES 4096
 static void SDLCALL feed(void *user, SDL_AudioStream *st, int additional, int total)
 {
     (void)user;
     (void)total;
     static float mixbuf[MIX_FRAMES * 2];
     while (additional > 0) {
-        int n = additional / 8;             /* stereo float frames */
+        int n = additional / 8;
         if (n > MIX_FRAMES)
             n = MIX_FRAMES;
         if (n <= 0)
@@ -193,7 +184,6 @@ static void SDLCALL feed(void *user, SDL_AudioStream *st, int additional, int to
         for (int i = 0; i < 2 * n; i++)
             mixbuf[i] = mixbuf[i] > 1 ? 1 : mixbuf[i] < -1 ? -1 : mixbuf[i];
         SDL_PutAudioStreamData(st, mixbuf, n * 8);
-        /* GT_WAVDUMP=path: the first minute of the mix as 16-bit WAV (testing) */
         static FILE *wav;
         static u32 wav_frames;
         static int wav_tried;
@@ -237,14 +227,11 @@ static void start_audio(void)
     rt_log("[al] audio out: %d Hz stereo\n", OUT_RATE);
 }
 
-/* CRASH_DUMP (crashdump.c): silence while the crash box is up */
 void al_stop_all(void)
 {
     if (stream)
         SDL_PauseAudioStreamDevice(stream);
 }
-
-/* ALC */
 
 u32 h_alcOpenDevice(u32 name)
 {
@@ -275,8 +262,6 @@ u32 h_alcGetProcAddress(u32 dev, u32 name)
     rt_log("[al] alcGetProcAddress(%s): none\n", n);
     return 0;
 }
-
-/* buffers */
 
 void h_alGenBuffers(u32 n, u32 out)
 {
@@ -309,8 +294,6 @@ void h_alBufferData(u32 id, u32 format, u32 data, u32 size, u32 freq)
     int chans = format == AL_FORMAT_STEREO8 || format == AL_FORMAT_STEREO16 ? 2 : 1;
     int bits = format == AL_FORMAT_MONO8 || format == AL_FORMAT_STEREO8 ? 8 : 16;
     u32 frames = size / (u32)(chans * bits / 8);
-    /* each rate / channel count the game's buffers come in, once (PREMIUM_AUDIO: the premium
-       build's 44100 / 22050 Hz sounds must reach here at their own rate, not the free build's 32000 / 16000) */
     static u32 seen[16];
     static int nseen;
     u32 key = freq << 2 | (u32)chans << 1 | (bits == 16);
@@ -340,8 +323,6 @@ void h_alBufferData(u32 id, u32 format, u32 data, u32 size, u32 freq)
     }
     UNLOCK();
 }
-
-/* sources */
 
 void h_alGenSources(u32 n, u32 out)
 {
@@ -541,8 +522,6 @@ void h_alGetSourcei(u32 id, u32 param, u32 out)
         wr32(out, v);
 }
 
-/* the listener */
-
 void h_alListener3f(u32 param, float x, float y, float z)
 {
     if (param == AL_POSITION) {
@@ -567,19 +546,16 @@ void h_alListenerfv(u32 param, u32 v)
 }
 void h_alDistanceModel(u32 model) { dist_model = model; }
 
-/* AudioSession, AudioServices */
-
 u32 h_AudioSessionInitialize(u32 a, u32 b, u32 listener, u32 user) { (void)a, (void)b, (void)listener, (void)user; return 0; }
 u32 h_AudioSessionSetActive(u32 on) { (void)on; return 0; }
 u32 h_AudioSessionSetProperty(u32 id, u32 size, u32 data) { (void)id, (void)size, (void)data; return 0; }
 u32 h_AudioSessionGetProperty(u32 id, u32 size, u32 data)
 {
 #define FOURCC(a, b, c, d) ((u32)(a) << 24 | (u32)(b) << 16 | (u32)(c) << 8 | (u32)(d))
-    /* kAudioSessionProperty_OtherAudioIsPlaying 'othr', CurrentHardwareSampleRate 'chsr' ... */
     u32 n = size ? rd32(size) : 0;
     if (data && n)
         memset(GP(data), 0, n);
-    if (id == FOURCC('c', 'h', 's', 'r') && data && n == 8) {   /* Float64 */
+    if (id == FOURCC('c', 'h', 's', 'r') && data && n == 8) {
         double r = OUT_RATE;
         memcpy(GP(data), &r, 8);
     }

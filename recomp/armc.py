@@ -1,23 +1,9 @@
-"""ARM / Thumb / VFP instruction -> C translator (stage 2).
-
-One Translator per function. translate(ins) returns (lines, term): C
-statements for the instruction and whether control never falls through to
-the next instruction. Registers are C locals (see runtime/arm_rt.h).
-
-Capstone 5 detail is used for registers and immediates, but memory operands
-are parsed from op_str: the operand detail loses the sign of post-indexed
-offsets ('ldr r0, [r1], #-4' comes out as +4) and the post-index flag.
-
-In test mode (difference tests against Unicorn) every jump, call and return
-stores the next pc in NEXT and leaves the test function instead.
-"""
 import re
 import struct
 
 from capstone import arm as A
 
 M32 = 0xFFFFFFFF
-# Guest range that the host cannot map at its own address (host/games/gtracing/layout.h GT_LOW_START/END).
 LOW_START, LOW_END = 0x1000, 0x11000
 
 GPR = {'r%d' % i: 'R%d' % i for i in range(13)}
@@ -43,7 +29,6 @@ class Unsupported(Exception):
 
 
 def split_mnemonic(ins):
-    """('add', True, ['f32', ...]): head without condition, S flag, data types."""
     parts = ins.mnemonic.split('.')
     head = parts[0]
     if ins.cc not in (A.ARM_CC_AL, A.ARM_CC_INVALID):
@@ -65,7 +50,6 @@ def hx(v):
 
 
 class Program:
-    """What a translator needs to know about the whole executable."""
 
     def __init__(self, macho, data):
         self.m = macho
@@ -76,7 +60,7 @@ class Program:
         self.text_lo, self.text_hi = text.addr, text.end
         seg = next(g for g in macho.segments if g.name == '__TEXT')
         self.ro_lo, self.ro_hi = seg.vmaddr, seg.vmaddr + seg.filesize
-        self.imports_used = {}          # C name -> import name
+        self.imports_used = {}
 
     def import_cname(self, name):
         c = 'I_' + re.sub(r'[^0-9A-Za-z_]', lambda m: '_%02x' % ord(m.group(0)), name.lstrip('_'))
@@ -84,7 +68,6 @@ class Program:
         return c
 
     def read_ro(self, a, n):
-        """Bytes of read-only __TEXT (literal pools), or None."""
         if self.ro_lo <= a and a + n <= self.ro_hi:
             return self.m.read(a, n)
         return None
@@ -93,23 +76,19 @@ class Program:
 class Translator:
     def __init__(self, prog, fn, test=False):
         self.p = prog
-        self.fn = fn                    # dict from functions.json
+        self.fn = fn
         self.thumb = fn['thumb']
         self.test = test
         self.ctl = {s: (k, t) for s, k, t in fn.get('ctl', [])}
         self.tables = fn.get('tables', [])
-        self.labels = set()             # internal addresses jumped to
+        self.labels = set()
         self.has_sjlj = bool(fn.get('taken'))
         self.datarefs = set(fn.get('datarefs', []))
         self.warn = []
-        # Statically tracked FPSCR state (VFP short vectors).
         self.vec_len, self.vec_stride, self.fz, self.dn = 1, 1, False, False
-        self.kconst = {}                # reg -> known constant (for vmsr)
+        self.kconst = {}
 
-    # small helpers
     def addr_const(self, v):
-        """An address the code computes from pc.  Data below LOW_END cannot sit at its own address
-        on the host (host/games/gtracing/layout.h): it is read from a copy, through LOWADDR()."""
         if LOW_START <= v < LOW_END and v in self.datarefs:
             return 'LOWADDR(%s)' % hx(v)
         return hx(v)
@@ -121,7 +100,6 @@ class Translator:
         return GPR[ins.reg_name(reg)]
 
     def rd_expr(self, ins, reg, align=False):
-        """C expression reading general register reg."""
         name = self.rn(ins, reg)
         if name == 'PC':
             v = self.pcval(ins)
@@ -135,7 +113,6 @@ class Translator:
         th = self.p.func_thumb.get(t)
         return default if th is None else th
 
-    # control flow primitives
     def j_goto(self, t, site):
         if self.test:
             return ['NEXT = %s; goto out;' % hx(t | int(self.thumb))]
@@ -151,14 +128,13 @@ class Translator:
         return self.j_exit() + ['RET_SYNC();', 'return;']
 
     def callee(self, t):
-        """C call statement for a direct call / tail call to guest address t."""
         if t in self.p.stubs:
             name, local = self.p.stubs[t]
             if local is not None:
                 return 'F_%x(c);' % (local & ~1), False
             if name is None:
                 raise Unsupported('stub %x without name' % t)
-            cname = self.p.import_cname(name)       # still listed: the import table keeps its bridge
+            cname = self.p.import_cname(name)
             if name in INLINE_IMPORTS:
                 return '%s(c);' % INLINE_IMPORTS[name], False
             return '%s(c);' % cname, is_noreturn_import(name)
@@ -168,19 +144,16 @@ class Translator:
 
     def j_tail(self, t, site, thumb_hint=None):
         if self.test:
-            # b / cbz to outside the function: no mode change.
             return ['NEXT = %s; goto out;' % hx(t | int(self.thumb))]
         call, _ = self.callee(t)
         return self.j_exit() + ['CALL_PRE(LR);', call, 'return;']
 
     def j_call(self, ins, t, thumb_target):
-        """bl / blx imm. Returns (lines, noreturn)."""
         ret = (ins.address + ins.size) | int(self.thumb)
         if self.test:
             return ['LR = %s; NEXT = %s; goto out;' % (hx(ret), hx(t | int(thumb_target)))], False
         stub = self.p.stubs.get(t)
         if stub and stub[1] is None and stub[0] in ('_setjmp', '_sigsetjmp'):
-            # Returns twice: a host setjmp in this frame (runtime/arm_rt.h GUEST_SETJMP).
             return ['CALL_PRE(%s);' % hx(ret), 'SYNC_HI_OUT();',
                     'GUEST_SETJMP(%d);' % (stub[0] == '_sigsetjmp')], False
         call, noret = self.callee(t)
@@ -200,7 +173,6 @@ class Translator:
         return ['{ u32 t_ = %s; CALL_PRE(%s); CALL_IND(t_); CALL_POST(); }' % (expr, hx(ret))]
 
     def j_table(self, ins, idx):
-        """Jump table number idx of this function at ins."""
         t = self.tables[idx]
         kind = t['kind']
         ops = ins.operands
@@ -239,8 +211,6 @@ class Translator:
         return out
 
     def pc_write(self, ins, value_expr, interwork, pre=()):
-        """An instruction that writes PC (other than b/bl/bx imm forms).
-        pre: statements to run first (loads, writeback)."""
         lines = list(pre)
         kind, t = self.ctl.get(ins.address, (None, None))
         if self.test and kind != 'table':
@@ -259,9 +229,7 @@ class Translator:
         self.warn.append('%x: unresolved write to pc: %s %s' % (ins.address, ins.mnemonic, ins.op_str))
         return lines + ['TRAP(%s, TRAP_IJUMP);' % hx(ins.address)]
 
-    # operand 2
     def imm_carry(self, ins):
-        """Carry out of a modified immediate (ARM rotated / Thumb-2), or None."""
         b = ins.bytes
         if not self.thumb:
             w = struct.unpack('<I', b)[0]
@@ -277,7 +245,6 @@ class Translator:
         return False
 
     def operand2(self, ins, op, need_carry):
-        """(pre_lines, expr, carry_expr or None)."""
         if op.type == A.ARM_OP_IMM:
             v = op.imm & M32
             carry = None
@@ -316,7 +283,6 @@ class Translator:
             return [], '%s_r(%s, %s)' % (fn, x, rs), None
         return ['u32 sc_ = CF; u32 so_ = %s_rc(%s, %s, &sc_);' % (fn, x, rs)], 'so_', 'sc_'
 
-    # entry
     def translate(self, ins):
         head, s, dts = split_mnemonic(ins)
         cond = COND.get(ins.cc)
@@ -332,7 +298,6 @@ class Translator:
         return body, term
 
     def track_const(self, ins, head, cond):
-        """Constants in registers, for 'vmsr fpscr, rX' (VFP vector mode)."""
         if head == 'vmsr':
             return
         _, written = ins.regs_access()
@@ -394,7 +359,6 @@ class Translator:
             return self.vfp(ins, head, dts)
         raise Unsupported('no translation for %s' % ins.mnemonic)
 
-    # data processing
     def alu(self, ins, head, s):
         ops = ins.operands
         if head in ('tst', 'teq', 'cmp', 'cmn'):
@@ -423,7 +387,6 @@ class Translator:
         pre, b, carry = self.operand2(ins, src, need_c)
         a = None
         if n is not None:
-            # Thumb ALU with PC and an immediate is ADR: Align(PC, 4).
             a = self.rd_expr(ins, n.reg, align=self.thumb and src.type == A.ARM_OP_IMM)
         if head in ('addw', 'subw'):
             head = head[:3]
@@ -443,19 +406,17 @@ class Translator:
                 return self.pc_alu(ins, head, expr[head](), lines), self.uncond(ins)
             if (n is not None and self.rn(ins, n.reg) == 'PC' and src.type == A.ARM_OP_IMM
                     and head in ('add', 'sub')):
-                # add rX, pc, #imm: an address in this function (data it reads, or a label).
                 pv = self.pcval(ins) & ~3 if self.thumb else self.pcval(ins)
                 v = (pv + src.imm if head == 'add' else pv - src.imm) & M32
                 lines.append('%s = %s;' % (dv, self.addr_const(v)))
                 return wrap(lines), False
             lines.append('%s = %s;' % (dv, expr[head]()))
             return wrap(lines), False
-        # Flag-setting forms.
         if dv == 'PC':
             raise Unsupported('flag-setting write to pc')
         if head in LOGICAL:
             if carry is not None and carry != 'sc_':
-                lines.append('u32 c_ = %s;' % carry)     # before the destination changes
+                lines.append('u32 c_ = %s;' % carry)
                 carry = 'c_'
             if dv is None:
                 lines.append('u32 r_ = %s; SET_NZ(r_);' % expr[head]())
@@ -476,8 +437,7 @@ class Translator:
         return wrap(lines), False
 
     def pc_alu(self, ins, head, expr, pre):
-        # add pc, pc, #imm (br), mov pc, lr (ret), add pc, rA, rB (table) ...
-        interwork = not self.thumb          # ARM-state ALU writes interwork on ARMv7
+        interwork = not self.thumb
         return self.pc_write(ins, '(%s)' % expr, interwork, pre)
 
     def shift_insn(self, ins, head, s):
@@ -487,8 +447,6 @@ class Translator:
             x = self.rd_expr(ins, ops[1].reg)
             pre, e, carry = self.shift(ins, x, A.ARM_SFT_RRX, 0, s)
         elif len(ops) == 2 and ops[1].type == A.ARM_OP_REG and ops[1].shift.type != A.ARM_SFT_INVALID:
-            # ARM 'lsl r4, r0, #2' is MOV with a shifted register: capstone keeps
-            # the shift on the operand (amount or register).
             pre, e, carry = self.operand2(ins, ops[1], s)
         else:
             if len(ops) == 2:
@@ -519,7 +477,6 @@ class Translator:
                 lines.append('CF = %s;' % carry)
         return wrap(lines), False
 
-    # multiply
     def mul(self, ins, head, s):
         ops = ins.operands
         r = [self.rd_expr(ins, o.reg) for o in ops]
@@ -567,7 +524,6 @@ class Translator:
             return ['%s = (u32)(((s64)(s32)%s * (s16)%s) >> 16);' % (dst[0], r[1], b16)], False
         raise Unsupported(head)
 
-    # bit field / extend
     def bits(self, ins, head):
         ops = ins.operands
         d = self.rn(ins, ops[0].reg)
@@ -622,11 +578,9 @@ class Translator:
             return wrap(pre + ['%s = %s((s32)%s, %d, &c->q);' % (d, head, x, bits)]), False
         raise Unsupported(head)
 
-    # memory
     MEM_RE = re.compile(r'\[([^\]]*)\](!?)(.*)$')
 
     def mem_operand(self, ins):
-        """(addr_expr, base_name, writeback_expr or None, literal_addr or None)."""
         m = self.MEM_RE.search(ins.op_str)
         if not m:
             raise Unsupported('no memory operand')
@@ -672,7 +626,6 @@ class Translator:
             return '%s %s %s' % (b, '-' if k == 'neg' else '+', v)
 
         if bexpr is None:
-            # PC base: literal (Align(PC, 4) + imm) or PC + register.
             pcv = self.pcval(ins)
             if pre_off is not None and pre_off[0] == 'imm' and not bang and post_off is None:
                 lit = ((pcv & ~3) + pre_off[1]) & M32
@@ -693,7 +646,7 @@ class Translator:
         rt = regs[0]
         kind, tix = self.ctl.get(ins.address, (None, None))
         if load and rt == 'PC' and kind == 'table' and not self.test:
-            return self.j_table(ins, tix), self.uncond(ins)   # the table is folded
+            return self.j_table(ins, tix), self.uncond(ins)
         if load and lit is not None:
             raw = self.p.read_ro(lit, size)
             if raw is not None:
@@ -791,7 +744,6 @@ class Translator:
             lines.append('%s = %s;' % (base, new_base))
         return wrap(lines), False
 
-    # branches
     def branch(self, ins, head):
         ops = ins.operands
         cond_uncond = self.uncond(ins)
@@ -822,7 +774,6 @@ class Translator:
             return self.j_table(ins, t), True
         raise Unsupported(head)
 
-    # VFP / NEON
     def vreg(self, ins, op):
         name = ins.reg_name(op.reg)
         return name[0], int(name[1:])
@@ -990,7 +941,6 @@ class Translator:
         (kd, d), (km, m) = self.vreg(ins, ops[0]), self.vreg(ins, ops[1])
         to, frm = dts
         if kd == 'd' and km == 'd' and to in ('f32', 's32', 'u32') and frm in ('f32', 's32', 'u32'):
-            # Advanced SIMD, 2 lanes of 32 bits.
             lanes = [(2 * d + j, 2 * m + j) for j in (0, 1)]
             return ['{ u32 x0_ = %s, x1_ = %s; c->V.s[%d] = x0_; c->V.s[%d] = x1_; }' % (
                 self.cvt_expr(to, frm, lanes[0][1]), self.cvt_expr(to, frm, lanes[1][1]),
@@ -1015,7 +965,6 @@ class Translator:
         if frm == 'f32':
             return '%s(c->V.f[%d])' % ('cvt_f2s' if to == 's32' else 'cvt_f2u', lane)
         if to == 'f32':
-            # int -> float bits
             return 'f2bits((float)%sc->V.s[%d])' % ('(s32)' if frm == 's32' else '', lane)
         raise Unsupported('cvt lane')
 
@@ -1033,7 +982,6 @@ class Translator:
         raise Unsupported('varith %s %s' % (head, dt))
 
     def vfp_scalar(self, ins, head, regs, ops, k):
-        """VFP data processing; expands to a short vector when FPSCR.LEN > 1."""
         imm = None
         if head == 'vmov' and ops[1].type == A.ARM_OP_FP:
             imm = ops[1].fp
@@ -1044,17 +992,16 @@ class Translator:
         if k == 'd' and dst >= 16:
             ln = 1
         if ln > 1 and dst // bank == 0:
-            ln = 1                              # destination in bank 0: scalar
+            ln = 1
         def elem(r, i, vector):
             if not vector:
                 return r
             b = r - r % bank
             return b + (r - b + i * stride) % bank
 
-        # Sd vector => Sn vector; Sm is a scalar when it is in bank 0.
         vec_m = bool(srcs) and (srcs[-1] // bank != 0)
         out = []
-        for i in range(ln):                     # elements run one after another
+        for i in range(ln):
             d = elem(dst, i, ln > 1)
             if head in ('vabs', 'vneg', 'vsqrt', 'vmov'):
                 m = elem(srcs[0], i, ln > 1 and vec_m) if srcs else None
@@ -1073,7 +1020,6 @@ class Translator:
         return e
 
     def vstmt(self, head, k, n, m, d, imm):
-        """One element of a VFP data-processing instruction, as a C statement."""
         bits = 'c->V.s[%d]' if k == 's' else 'c->V.d[%d]'
         if head == 'vmov':
             if imm is not None:
@@ -1103,7 +1049,7 @@ class Translator:
         a, b, acc = f(n), f(m), f(d)
         p = '%s * %s' % (a, b)
         if k == 's' and self.fz and head in ('vmla', 'vmls', 'vnmla', 'vnmls'):
-            p = 'ftz(%s)' % p                   # the product is rounded (and flushed) first
+            p = 'ftz(%s)' % p
         return {'vadd': '%s + %s' % (a, b), 'vsub': '%s - %s' % (a, b), 'vmul': p,
                 'vdiv': '%s / %s' % (a, b), 'vnmul': '-(%s)' % p,
                 'vmla': '%s + %s' % (acc, p), 'vmls': '%s - %s' % (acc, p),
@@ -1145,7 +1091,6 @@ def half(r, which):
 
 
 def wrap(lines):
-    """Put statements that declare temporaries into their own block."""
     if any(x.startswith('u32 ') or x.startswith('u64 ') for x in lines):
         return ['{'] + ['  ' + x for x in lines] + ['}']
     return lines
@@ -1159,8 +1104,6 @@ NORETURN_IMPORTS = {
 }
 
 
-# Imports done inline at each call (runtime/arm_rt.h): pure functions the game calls thousands of times a frame
-# (fmax / fmin through the bridge were ~8 % of the race's render thread work).
 INLINE_IMPORTS = {'_fmax': 'imp_fmax', '_fmin': 'imp_fmin'}
 
 

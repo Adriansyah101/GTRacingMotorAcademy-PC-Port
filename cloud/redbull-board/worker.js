@@ -1,31 +1,6 @@
-// GT Racing PC port: the Red Bull Time Trial's cloud leaderboard (RED_BULL_BOARD + CLOUD_BOARD).
-// A Cloudflare Worker over one D1 (SQLite) table, schema.sql.  The offline board of board.c (this PC's player and
-// the friends met in multiplayer) shared through a small self-hosted server, reached by the game with WinHTTP
-// (host/games/gtracing/features/board.c).
-//
-//   GET  /board   the 200 best laps, fastest first:
-//                 {"v":1,"rows":[{"id":"<10 hex>","name":"...","car":411,"time_ms":77736}, ...]}
-//                 "id" is alias(player_id), never the player_id itself.  Kept in the edge cache (caches.default)
-//                 for CACHE_SECONDS (30..60, default 45), so a crowd opening the menu reads D1 once a minute or
-//                 so per Cloudflare location.  The cache works on a route of your own domain; on *.workers.dev
-//                 Cloudflare has no cache, so every GET reads D1 (the game asks at most once a minute).
-//   POST /submit  {"player_id":"<8 hex>","name":"...","car":411,"time_ms":77736}, those four keys and no more.
-//                 Checked: JSON, the id, the name (1..20 printable ASCII, no < > &: the game's own rule, board.c
-//                 clean_name), the car and a lap time within MIN_LAP_MS..MAX_LAP_MS (a lap faster than the F1 RB8
-//                 can go is a cheat).  An UPSERT that only ever makes a player's time better.
-//                 200 {"ok":true,"improved":true|false}, 400 {"error":"..."} for a bad request.
-//
-// The player_id is a random number the game made once (redbull_board.txt, "me <id>"): no account, no Windows user
-// name, no PC name.  It is the only key a player has, so the board never shows it: GET hands out
-// alias(id) = the first 10 hex digits of SHA-256("gtlb1:" + id), the same the game computes to find its own row.
-// That is not a login: an id is 32 bits, a determined cheater could search for the id behind an alias.  What it
-// stops is the easy way, copying an id off the board and sending a time in that player's name.
-//
-// Nothing here logs or keeps the sender's IP address.
-
 const TOP = 200;
-const CAR = 411;                                   // the Red Bull Time Trial's car, the F1 RB8 (board.c RB_CAR)
-const NAME_MAX = 20;                               // board.c clean_name keeps 20 characters
+const CAR = 411;
+const NAME_MAX = 20;
 const BODY_MAX = 512;
 
 function json(status, value, extra = {}) {
@@ -40,8 +15,6 @@ function intVar(env, name, fallback, lo, hi) {
   return Number.isInteger(v) && v >= lo && v <= hi ? v : fallback;
 }
 
-// the limits of a believable lap.  A fast real lap (France Raceway, F1 RB8) is about 1:15.9; MIN_LAP_MS (default 50 s)
-// is far below anything driven, MAX_LAP_MS (default 10 min) only keeps junk out.  wrangler.toml [vars] sets both.
 function limits(env) {
   return {
     min: intVar(env, "MIN_LAP_MS", 50000, 1000, 3600000),
@@ -55,13 +28,11 @@ export async function alias(playerId) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 10);
 }
 
-// a name as board.c makes them: printable ASCII without < > &, at most 20, not only spaces
 export function validName(s) {
   return typeof s === "string" && s.length >= 1 && s.length <= NAME_MAX && /^[\x20-\x7e]+$/.test(s) &&
     !/[<>&]/.test(s) && s.trim().length > 0;
 }
 
-// the request's body as a submission, or a reason it is not one
 export function parseSubmit(text, env) {
   let v;
   try {
@@ -88,7 +59,6 @@ const UPSERT =
 
 const TOP_QUERY = `SELECT player_id, name, car, time_ms FROM board ORDER BY time_ms ASC, updated_at ASC LIMIT ${TOP}`;
 
-// one cache entry for every GET /board, whatever its query string (a query string cannot get round the cache)
 function cacheKey(url) {
   return new Request(url.origin + "/board", { method: "GET" });
 }
@@ -131,7 +101,7 @@ async function submit(request, url, env, ctx) {
   const res = await env.DB.prepare(UPSERT).bind(r.player_id, r.name, r.car, r.time_ms, Date.now()).run();
   const improved = (res?.meta?.changes ?? 0) > 0;
   const cache = globalThis.caches?.default;
-  if (improved && cache) ctx.waitUntil(cache.delete(cacheKey(url)));   // this location shows it at once
+  if (improved && cache) ctx.waitUntil(cache.delete(cacheKey(url)));
   return json(200, { ok: true, improved });
 }
 
@@ -149,7 +119,6 @@ export default {
       }
       return json(404, { error: "not found" });
     } catch {
-      // D1 out of its daily quota or not reachable: the game keeps its own board (board.c falls back offline)
       return json(503, { error: "unavailable" }, { "retry-after": "600" });
     }
   },

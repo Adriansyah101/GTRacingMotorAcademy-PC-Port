@@ -1,16 +1,6 @@
-/* blocks.c -- the Blocks runtime (libclosure, as iOS 5 has it) and dispatch_async.
-
-   A block literal: {isa, flags, reserved, invoke, descriptor}; descriptor {reserved, size,
-   copy_helper, dispose_helper} (the helpers when flags has BLOCK_HAS_COPY_DISPOSE).  The compiler
-   makes stack and global blocks; copying moves a stack block to the heap (isa __NSMallocBlock__),
-   with its captured objects retained and __block variables (byref structs {isa, forwarding,
-   flags, size, [keep, destroy], vars}) moved with it.  Heap blocks are counted in the flags.
-
-   The game only dispatches to the main queue (the one queue it imports): the block runs later on
-   the main thread's run loop. */
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "ns.h"
 
@@ -71,7 +61,7 @@ static u32 byref_copy(u32 p)
     if ((fw->flags & BLOCK_REFCOUNT_MASK) == 0) {
         Byref *copy = malloc(src->size);
         copy->isa = 0;
-        copy->flags = src->flags | BLOCK_NEEDS_FREE | 4;   /* the stack one points here, and the caller */
+        copy->flags = src->flags | BLOCK_NEEDS_FREE | 4;
         copy->forwarding = GA(copy);
         src->forwarding = GA(copy);
         copy->size = src->size;
@@ -113,7 +103,7 @@ void h_Block_object_assign(u32 dest, u32 obj, u32 flags)
     case FIELD_IS_BYREF | FIELD_IS_WEAK:
         wr32(dest, byref_copy(obj));
         break;
-    default:   /* BYREF_CALLER variants: the byref's own copy helper moving its variable */
+    default:
         if ((flags & BYREF_CALLER) && (flags & 0x7f) == FIELD_IS_BLOCK)
             wr32(dest, gt_block_copy(obj));
         else
@@ -141,8 +131,6 @@ void h_Block_object_dispose(u32 obj, u32 flags)
     }
 }
 
-/* blocks as objects */
-
 static void b_copy(CPU *c) { ret_i(c, gt_block_copy(SELF)); }
 static void b_retain(CPU *c)
 {
@@ -154,21 +142,18 @@ static void b_release(CPU *c) { gt_block_release(SELF); }
 static void b_autorelease(CPU *c)
 {
     if (((Block *)GP(SELF))->flags & BLOCK_NEEDS_FREE)
-        objc_autorelease(SELF);   /* the pool's release comes back here */
+        objc_autorelease(SELF);
 }
 static void b_retainCount(CPU *c) { ret_i(c, (((Block *)GP(SELF))->flags & BLOCK_REFCOUNT_MASK) / 2); }
 static void b_invoke(CPU *c) { rt_call1(((Block *)GP(SELF))->invoke, SELF); }
 
-/* dispatch_async */
-
 void h_dispatch_async(u32 queue, u32 block)
 {
-    (void)queue;   /* &_dispatch_main_q: the only queue the game has */
+    (void)queue;
     u32 b = gt_block_copy(block);
-    ns_perform_main(b, "gtInvoke", 0);   /* objc_retain: the side table's count */
-    objc_release(b);                     /* back to none: the perform's release ends in -dealloc */
+    ns_perform_main(b, "gtInvoke", 0);
+    objc_release(b);
 }
-/* the run loop's objc_release of the last side-table reference: our copy's own count */
 static void b_dealloc(CPU *c) { gt_block_release(SELF); }
 
 void gt_blocks_init(void)

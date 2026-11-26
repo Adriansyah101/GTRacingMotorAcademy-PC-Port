@@ -1,16 +1,8 @@
-/* uikit.c -- the host's UIKit (stage 4): UIApplicationMain and its run loop, the screen and device,
-   views, windows, view controllers, layers, UITouch / UIEvent and UIAccelerometer (fed by pcinput.c, the PC's input).
-
-   Nothing UIKit draws itself is shown: the game's picture is its OpenGL ES framebuffer (eagl.c).
-   Views are still kept with their geometry (bounds, center, transform, superview), because the
-   game reads them back, rotates them for landscape, and touches are found and converted by it.
-
-   Host state is inside the objects (objc_host_size): game subclasses' ivars come after it. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "ui.h"
 #include "uikit_input.h"
@@ -25,8 +17,6 @@ float ui_tilt;
 
 static DWORD main_tid;
 int ui_is_main_thread(void) { return GetCurrentThreadId() == main_tid; }
-
-/* small helpers */
 
 static u32 cls(const char *name) { return ns_class(name); }
 static id singleton(id *slot, const char *name, u32 bytes)
@@ -49,7 +39,7 @@ static GtRect arg_rect(CPU *c, int i) { return (GtRect){arg_f(c, i), arg_f(c, i 
 static GtPoint arg_point(CPU *c, int i) { return (GtPoint){arg_f(c, i), arg_f(c, i + 1)}; }
 
 static const GtAffine IDENT = {1, 0, 0, 1, 0, 0};
-static GtAffine aff_mul(GtAffine a, GtAffine b)   /* a then b */
+static GtAffine aff_mul(GtAffine a, GtAffine b)
 {
     return (GtAffine){a.a * b.a + a.b * b.c, a.a * b.b + a.b * b.d, a.c * b.a + a.d * b.c, a.c * b.b + a.d * b.d,
                       a.tx * b.a + a.ty * b.c + b.tx, a.tx * b.b + a.ty * b.d + b.ty};
@@ -77,15 +67,13 @@ static GtRect aff_rect(GtAffine m, GtRect r)
     return (GtRect){x0, y0, x1 - x0, y1 - y0};
 }
 
-/* objects */
-
 typedef struct {
     u32 isa;
-    u32 layer;                 /* CALayer, +1 */
-    u32 superview, window;     /* not retained */
-    u32 subviews;              /* NSMutableArray +1, or 0 */
-    u32 controller;            /* the view controller whose view this is (next responder) */
-    u32 bg;                    /* UIColor +1 */
+    u32 layer;
+    u32 superview, window;
+    u32 subviews;
+    u32 controller;
+    u32 bg;
     u32 tag, autoresize, content_mode, gestures;
     GtRect bounds;
     GtPoint center;
@@ -117,9 +105,6 @@ typedef struct { u32 isa; float size; u32 name; } Font;
 static id app_obj, screen_obj, device_obj, accel_obj;
 static u32 cls_view, cls_window, cls_layer, cls_touch, cls_event, cls_color, cls_app;
 
-/* geometry */
-
-/* the view's coordinates -> its superview's (or the screen's for a window) */
 static GtAffine to_super(id v)
 {
     View *x = VW(v);
@@ -153,7 +138,7 @@ static void view_set_frame(id v, GtRect f)
     View *x = VW(v);
     GtAffine t = x->transform;
     float w = f.w, h = f.h;
-    if (fabsf(t.a) < 0.5f && fabsf(t.b) > 0.5f) {   /* turned by 90 degrees: the frame's sides swap */
+    if (fabsf(t.a) < 0.5f && fabsf(t.b) > 0.5f) {
         w = f.h;
         h = f.w;
     }
@@ -184,22 +169,17 @@ static id view_window(id v)
     return 0;
 }
 
-/* UIResponder */
-
 static void r_next(CPU *c) { ret_i(c, 0); }
 static void r_yes(CPU *c) { ret_i(c, 1); }
 static void r_no(CPU *c) { ret_i(c, 0); }
 static void r_nop(CPU *c) { (void)c; }
 static void r_forward(CPU *c)
 {
-    /* touches...:withEvent: the view did not handle: up the responder chain */
     u32 self = SELF, sel = c->r[1], a = ARG(0), b = ARG(1);
     id next = msg0(self, "nextResponder");
     if (next)
         msg2(next, sel_name(sel), a, b);
 }
-
-/* CALayer / CAEAGLLayer */
 
 static void ly_init(CPU *c)
 {
@@ -306,8 +286,6 @@ static void ly_transform3d(CPU *c)
     float m[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     memcpy(GP(ST_RET), m, sizeof m);
 }
-
-/* UIView */
 
 static void view_setup(id v, GtRect frame)
 {
@@ -548,7 +526,6 @@ static int point_inside(id v, GtPoint p)
     return p.x >= b.x && p.y >= b.y && p.x < b.x + b.w && p.y < b.y + b.h;
 }
 static void v_pointInside(CPU *c) { ret_i(c, point_inside(SELF, arg_point(c, 2))); }
-/* hitTest: in the view's coordinates; the deepest visible, interactive view containing p */
 static id hit_test(id v, GtPoint p)
 {
     View *x = VW(v);
@@ -576,7 +553,6 @@ static void v_addGesture(CPU *c)
 }
 static void v_gestures(CPU *c) { ret_i(c, VW(SELF)->gestures); }
 
-/* animations happen at once: the block, then the completion */
 static u32 anim_delegate, anim_stop;
 static void va_begin(CPU *c) { anim_delegate = anim_stop = 0; (void)c; }
 static void va_setDelegate(CPU *c) { anim_delegate = ARG(0); }
@@ -599,12 +575,9 @@ static void va_animateCompletion(CPU *c)
 }
 static void va_animateDelay(CPU *c)
 {
-    /* animateWithDuration:(double)delay:(double)options:animations:completion: */
     call_block(arg_word(c, 7), 0, 0);
     call_block(arg_word(c, 8), 1, 1);
 }
-
-/* UIWindow */
 
 static void w_initWithFrame(CPU *c)
 {
@@ -657,8 +630,6 @@ static void w_setRoot(CPU *c)
 static void w_setLevel(CPU *c) { WN(SELF)->level = ARGF(0); }
 static void w_level(CPU *c) { ret_f(c, WN(SELF)->level); }
 static void w_screen(CPU *c) { ret_i(c, screen_obj); }
-
-/* UIViewController */
 
 static void vc_init(CPU *c) { VC(SELF)->orientation = UI_ORIENTATION; ret_i(c, SELF); }
 static void vc_initWithNib(CPU *c)
@@ -735,7 +706,7 @@ static void vc_presentCompletion(CPU *c)
 static void vc_dismiss(CPU *c)
 {
     id self = SELF, vc = VC(self)->presented;
-    if (!vc && VC(self)->presenting) {   /* sent to the presented controller */
+    if (!vc && VC(self)->presenting) {
         vc = self;
         self = VC(vc)->presenting;
     }
@@ -768,8 +739,6 @@ static void vc_setTitle(CPU *c)
     objc_release(old);
 }
 
-/* UIApplication */
-
 static void a_shared(CPU *c) { ret_i(c, app_obj); }
 static void a_delegate(CPU *c) { ret_i(c, AP(SELF)->delegate); }
 static void a_setDelegate(CPU *c) { AP(SELF)->delegate = ARG(0); }
@@ -786,8 +755,6 @@ static void a_barHidden(CPU *c) { ret_i(c, AP(SELF)->bar_hidden); }
 static void a_barOrientation(CPU *c) { ret_i(c, AP(SELF)->bar_orientation); }
 static void a_setBarOrientation(CPU *c)
 {
-    /* logged when it changes (optimisation pass 4): the game sets it every few frames, the same value each time
-       (2,352 of a session's 2,849 log lines, each flushed to disk) */
     static u32 logged = 0xffffffffu;
     AP(SELF)->bar_orientation = ARG(0);
     if (ARG(0) != logged) {
@@ -808,13 +775,10 @@ static void a_bgTask(CPU *c) { ret_i(c, 0); }
 static void a_emptyArray(CPU *c) { ret_i(c, objc_autorelease(ns_array_new(NULL, 0))); }
 static void a_sendAction(CPU *c)
 {
-    /* sendAction:to:from:forEvent: */
     if (ARG(1))
         msg1(ARG(1), sel_name(ARG(0)), ARG(2));
     ret_i(c, ARG(1) != 0);
 }
-
-/* UIScreen, UIScreenMode, UIDevice */
 
 static void s_main(CPU *c) { ret_i(c, screen_obj); }
 static void s_screens(CPU *c)
@@ -845,9 +809,7 @@ static void d_udid(CPU *c) { ret_i(c, ns_string("0123456789abcdef0123456789abcde
 static void d_orientation(CPU *c) { ret_i(c, UI_ORIENTATION); }
 static void d_idiom(CPU *c) { ret_i(c, 1); }
 static void d_battery(CPU *c) { ret_f(c, 1.0f); }
-static void d_batteryState(CPU *c) { ret_i(c, 3); }   /* UIDeviceBatteryStateFull */
-
-/* UIColor, UIFont */
+static void d_batteryState(CPU *c) { ret_i(c, 3); }
 
 static id color(u32 k, float r, float g, float b, float a)
 {
@@ -886,7 +848,6 @@ static void col_set(CPU *c) { (void)c; }
 
 static void font_sized(CPU *c)
 {
-    /* systemFontOfSize: / boldSystemFontOfSize: / fontWithName:size: */
     int named = c->r[1] == sel_get("fontWithName:size:");
     id o = ns_alloc(SELF, sizeof(Font));
     Font *f = GP(o);
@@ -904,8 +865,6 @@ static void font_withSize(CPU *c)
     ((Font *)GP(o))->name = objc_retain(((Font *)GP(SELF))->name);
     ret_i(c, objc_autorelease(o));
 }
-
-/* touches */
 
 static void t_locationInView(CPU *c)
 {
@@ -948,20 +907,14 @@ static void e_dealloc(CPU *c)
     objc_free_instance(SELF);
 }
 
-static id fingers[MAX_FINGERS];          /* active UITouch per finger, +1 */
+static id fingers[MAX_FINGERS];
 static double last_tap_time;
 static GtPoint last_tap_at;
 static int last_taps;
 
-/* WIDE_UI (widescreen.c): on a wider screen (GT_WIDE) gameswf draws the stage (1024 x 768) at one scale in
-   the middle, ui_stage_dx landscape points from the left edge.  The host's own points (its taps, the pad's
-   buttons, GT_TAPS, the pointer) are the stage's; the game turns a touch into a stage point by x * 1024 /
-   screen width (logged in gameswf's hit test: a touch at 300 of 1366 came as 224.9), so a
-   touch is handed over at stage x * width / 1024.  On a 4:3 screen all of it is the identity. */
 float ui_stage_dx;
 int ui_wide_ui;
 
-/* landscape points (what the game takes: 0 .. screen width x 768) -> portrait screen points */
 static GtPoint screen_from_landscape(float lx, float ly)
 {
     if (UI_ORIENTATION == 3)
@@ -986,13 +939,10 @@ static id top_window(void)
 static const char *const phase_sel[] = {"touchesBegan:withEvent:", "touchesMoved:withEvent:", "",
                                         "touchesEnded:withEvent:", "touchesCancelled:withEvent:"};
 
-/* phase 0 began, 1 moved, 3 ended; lx, ly in stage points (see ui_stage_dx) */
 void ui_touch_event(int finger, int phase, float lx, float ly)
 {
     if (finger < 0 || finger >= MAX_FINGERS || !app_obj)
         return;
-    /* WIDE_UI: a race HUD part drawn at a wide screen's edge takes the touch at its own place
-       (widescreen.c wide_hud_touch), the finger keeping that offset until it is lifted */
     static float finger_dx[MAX_FINGERS];
     if (phase == 0 && !fingers[finger]) {
         float ox = lx;
@@ -1060,10 +1010,8 @@ out:
     objc_pool_pop(mark);
 }
 
-/* UIAccelerometer: tilt from the keyboard or the pad */
-
 typedef struct { u32 isa, delegate; double interval; } Accel;
-typedef struct { u32 isa, pad; double t, x, y, z; } Accel_;   /* UIAcceleration: timestamp, x, y, z (doubles) */
+typedef struct { u32 isa, pad; double t, x, y, z; } Accel_;
 static double accel_next;
 static void ac_shared(CPU *c) { ret_i(c, singleton(&accel_obj, "UIAccelerometer", sizeof(Accel))); }
 static void ac_setDelegate(CPU *c)
@@ -1074,18 +1022,12 @@ static void ac_setDelegate(CPU *c)
 static void ac_delegate(CPU *c) { ret_i(c, ((Accel *)GP(SELF))->delegate); }
 static void ac_setInterval(CPU *c) { ((Accel *)GP(SELF))->interval = ARGD(0); }
 static void ac_interval(CPU *c) { ret_d(c, ((Accel *)GP(SELF))->interval); }
-/* No CoreMotion: [CMMotionManager alloc] is nil.  GT Racing still takes its CoreMotion path (its
-   choice comes from the device, not from the alloc), so its updates never start; steer.c fills the
-   game's Accelerometer object itself.  The UIAccelerometer below serves any other user. */
 static void cm_alloc(CPU *c) { ret_i(c, 0); }
 static void acc_t(CPU *c) { ret_d(c, ((Accel_ *)GP(SELF))->t); }
 static void acc_x(CPU *c) { ret_d(c, ((Accel_ *)GP(SELF))->x); }
 static void acc_y(CPU *c) { ret_d(c, ((Accel_ *)GP(SELF))->y); }
 static void acc_z(CPU *c) { ret_d(c, ((Accel_ *)GP(SELF))->z); }
 
-/* gravity in the device's axes (x right, y up the portrait screen, z out of it) for the iPad held in
-   landscape right, leaning back by ~40 degrees, turned like a wheel by ui_tilt (sign checked in a
-   race: +y turns the car left, so right = -y) */
 void ui_gravity(double g[3])
 {
     double ang = -ui_tilt * 0.6, lean = 0.7;
@@ -1117,16 +1059,7 @@ void ui_accel_tick(void)
     objc_pool_pop(mark);
 }
 
-/* UIApplicationMain */
-
-/* The window's pixel format: the one SDL would choose, but with PFD_SWAP_COPY when the driver has it.  With
-   SDL's choice (PFD_SWAP_EXCHANGE) the NVIDIA OpenGL driver takes over a window covering the screen: full
-   screen no longer goes through the desktop compositor, so Windows' own pop-ups (the volume and brightness
-   bar) are hidden under the game, and screen captures freeze on the last windowed frame.  The Gangstar
-   MV port had the same issue.  A port fault (an iPad has no such pop-ups).  The fix is
-   the GMV port's (gl_context.c pf_window, found there on the same driver): SDL has no attribute for the swap
-   method but copies the format of a window it is given, so a hidden one gets the format.  GT_SWAP_COPY=0 lets
-   SDL choose.  (A layered window style also kept full screen composed, but not every time.) */
+#ifdef _WIN32
 static LRESULT CALLBACK pf_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) { return DefWindowProcA(h, m, w, l); }
 
 static HWND pf_window(void)
@@ -1183,6 +1116,7 @@ static HWND pf_window(void)
     ReleaseDC(hwnd, dc);
     return hwnd;
 }
+#endif
 
 static void make_window(void)
 {
@@ -1206,20 +1140,22 @@ static void make_window(void)
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, h);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
-    /* FULL_SCREEN (display.c): GT_FULLSCREEN=1, written by Options > Display and Alt+Enter, starts full
-       screen (the desktop's mode); w x h stay the window's size for Alt+Enter back */
     const char *fs = getenv("GT_FULLSCREEN");
     if (fs && *fs == '1') {
         SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN, true);
         rt_log("[ui] full screen (GT_FULLSCREEN=1)\n");
     }
+#ifdef _WIN32
     HWND format_of = pf_window();
     if (format_of)
         SDL_SetPointerProperty(props, SDL_PROP_WINDOW_CREATE_WIN32_PIXEL_FORMAT_HWND_POINTER, format_of);
+#endif
     ui_window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
+#ifdef _WIN32
     if (format_of)
         DestroyWindow(format_of);
+#endif
     if (!ui_window)
         rt_fatal("SDL_CreateWindow: %s", SDL_GetError());
     ui_make_cursor();
@@ -1238,27 +1174,10 @@ static void deliver(id delegate, const char *sel, const char *note)
     objc_pool_pop(mark);
 }
 
-/* BACKGROUND_THROTTLE (optimisation pass 5)
-   Why.  An iPad app in the background is suspended: it draws nothing.  Here the window went on drawing 60 frames a
-   second (more with GT_FPS) behind other windows and while minimized, a whole core's worth of CPU and GPU work on a
-   laptop for a picture nobody sees.  A port gap (iOS has no windows), not a fault of the game.
-   What (polled once a pass of the main loop, from the window's flags):
-   - the window not in front: frames capped at GT_BACKGROUND_FPS (30).  The game counts time in frames (eagl.c's
-     60 cap), so it runs at half speed there, as in any 30 fps frame;
-   - minimized: GT_MINIMIZED_FPS (10), and the game is told what iOS tells it when the Home button is pressed
-     (applicationWillResignActive: / applicationDidEnterBackground:): it pauses a race itself (SetGamePause:1, its
-     pause menu waits when the window comes back) and suspends its movie; back up, applicationWillEnterForeground: /
-     applicationDidBecomeActive:.  GT_MINIMIZED_PAUSE=0: the frame cap only.  While minimized the 1 ms timer
-     period (timeBeginPeriod, below) is given back to Windows: nothing then waits on whole milliseconds that
-     anybody sees, and the frame cap's waits are on the precise timer (PRECISE_WAIT) anyway;
-   - none of this while a multiplayer game may be open (a socket of the game's, the ONLINE_P2P tunnel, a GameKit
-     session: Local, Bluetooth and Online): half speed or a pause on one machine would make the others wait or lose
-     it.
-   GT_BACKGROUND_THROTTLE=0: none of it. */
 static int bg_on = -1, bg_fps_unfocused = 30, bg_fps_minimized = 10, bg_pause_on = 1;
-static volatile int bg_fps;        /* the cap now (0 none), read by eagl.c's present on the render thread */
-static volatile int bg_min;        /* minimized now (the present skips its picture) */
-static int bg_paused;              /* resign / background told to the game */
+static volatile int bg_fps;
+static volatile int bg_min;
+static int bg_paused;
 int ui_background_fps(void) { return bg_fps; }
 int ui_minimized(void) { return bg_min; }
 
@@ -1324,8 +1243,6 @@ static void bg_poll(id delegate)
     }
 }
 
-/* GT_TEST_MINIMIZE=frame:seconds (testing BACKGROUND_THROTTLE): the window is minimized at that presented frame and
-   restored that many seconds later (a frame count would stall if the game stopped drawing) */
 static void bg_test(void)
 {
     static int at = -2;
@@ -1353,9 +1270,6 @@ u32 h_UIApplicationMain(u32 argc, u32 argv, u32 principal, u32 delegate_name)
 {
     (void)argc;
     (void)argv;
-    /* 1 ms timer ticks, kept (pass 5 looked at dropping it): the main loop's waits below (SDL_WaitEventTimeout) and
-       the game's own threads' usleep / Sleep wait in whole milliseconds and would wake on Windows' 15.6 ms tick
-       without it, which would break the 60 fps frame pacing.  Given back while minimized (BACKGROUND_THROTTLE). */
     timeBeginPeriod(1);
     make_window();
     steer_init();
@@ -1391,8 +1305,6 @@ u32 h_UIApplicationMain(u32 argc, u32 argv, u32 principal, u32 delegate_name)
         if (ui_quit)
             break;
         if (ns_precise_wait_on()) {
-            /* PRECISE_WAIT (ns_misc.c): the window's events wake a wait of whole milliseconds (ended 1 ms
-               early); the rest sleeps on the precise timer instead of spinning */
             if (next > 0.002) {
                 int ms = (int)(next * 1000.0) - 1;
                 SDL_WaitEventTimeout(NULL, ms > 50 ? 50 : ms);
@@ -1407,15 +1319,13 @@ u32 h_UIApplicationMain(u32 argc, u32 argv, u32 principal, u32 delegate_name)
         }
     }
     rt_log("[ui] window closed: the application terminates\n");
-    if (!bg_paused) {                  /* closed while minimized: the game is in the background already */
+    if (!bg_paused) {
         deliver(delegate, "applicationWillResignActive:", "UIApplicationWillResignActiveNotification");
         deliver(delegate, "applicationDidEnterBackground:", "UIApplicationDidEnterBackgroundNotification");
     }
     deliver(delegate, "applicationWillTerminate:", "UIApplicationWillTerminateNotification");
     exit(0);
 }
-
-/* the device model as Darwin tells it: sysctl, uname */
 
 static u32 sysctl_value(const void *v, u32 n, u32 oldp, u32 oldlenp)
 {
@@ -1466,15 +1376,15 @@ u32 h_sysctl(u32 mib, u32 n, u32 oldp, u32 oldlenp, u32 newp, u32 newlen)
     (void)newlen;
     u32 a = n > 0 ? rd32(mib) : 0, b = n > 1 ? rd32(mib + 4) : 0;
     static const char *const hw[] = {NULL, "hw.machine", "hw.model", "hw.ncpu", NULL, "hw.physmem", "hw.usermem"};
-    if (a == 6 && b < 7 && hw[b])                     /* CTL_HW */
+    if (a == 6 && b < 7 && hw[b])
         return sysctl_named(hw[b], oldp, oldlenp);
     if (a == 6 && b == 24)
         return sysctl_named("hw.memsize", oldp, oldlenp);
     if (a == 6 && b == 15)
         return sysctl_named("hw.cpufrequency", oldp, oldlenp);
-    if (a == 1 && b == 2)                             /* CTL_KERN, KERN_OSRELEASE */
+    if (a == 1 && b == 2)
         return sysctl_named("kern.osrelease", oldp, oldlenp);
-    if (a == 4 && b == 17 && n == 6 && rd32(mib + 16) == 3) {   /* CTL_NET, PF_ROUTE, .., NET_RT_IFLIST, index */
+    if (a == 4 && b == 17 && n == 6 && rd32(mib + 16) == 3) {
         if (rd32(mib + 20) == 1)
             return net_iflist(1, oldp, oldlenp);
     }
@@ -1493,8 +1403,6 @@ u32 h_uname(u32 buf)
     return 0;
 }
 
-/* registration */
-
 void ui_init(void)
 {
     main_tid = GetCurrentThreadId();
@@ -1503,8 +1411,6 @@ void ui_init(void)
         dev_model = "iPad3,1";
         ui_scale = 2.0f;
     }
-    /* GT_WIDE=<landscape width in points, 768 high> or "monitor" (the primary monitor's shape; DISPLAY_MENU's
-       Aspect Ratio row writes 1024 for 4:3, 1229 for 16:10, 1366 for 16:9, 1792 for 21:9) */
     const char *wide = getenv("GT_WIDE");
     int wide_w = rt_parse_int(wide, 0, 0, 100000);
     if (wide && !_stricmp(wide, "monitor")) {
@@ -1516,22 +1422,12 @@ void ui_init(void)
     }
     if (wide_w > 1024 && wide_w <= 2048) {
         ui_screen_h = (float)wide_w;
-        /* WIDE_UI (widescreen.c): the menus and the HUD at one scale, in the middle; GT_WIDE_UI=0 stretches
-           them over the width as the first widescreen probe did */
         const char *wu = getenv("GT_WIDE_UI");
         ui_wide_ui = !(wu && *wu == '0');
         ui_stage_dx = ui_wide_ui ? (ui_screen_h - 1024.0f) / 2 : 0;
         rt_log("[ui] GT_WIDE=%s: a %d x 768 screen, the menus %s\n", wide, wide_w,
                ui_wide_ui ? "in the middle at one scale (WIDE_UI)" : "stretched over it");
     }
-    /* GT_RESOLUTION: the game draws
-       its picture at this height in pixels instead of the device's own (768 on an iPad 2, 1536 on an iPad 3);
-       "monitor" = the primary monitor's height, or less if its width would not hold the picture (1440 x 1080 on
-       a 1920 x 1080 screen: the window's 4:3 picture in full screen, drawn 1:1).  It is the UIScreen scale (and
-       so the layer's contentsScale and the renderbuffer's size) that changes; the device (GT_DEVICE) stays,
-       hw.model follows the device, not the scale.  Tested at 1.40625 (1080 x 1440): menus, race
-       settings and a Quick Race start drawn whole, taps in place, 60 fps.  0: the device's own.  Not set: "monitor",
-       as GT_DEVICE ipad3, GT_WIDE monitor and GT_FULLSCREEN 1 (main.c default_settings). */
     const char *res = getenv("GT_RESOLUTION");
     if (res && *res && strcmp(res, "0")) {
         float s = 0;
@@ -1749,7 +1645,7 @@ void ui_init(void)
 
     gt_blocks_init();
     gt_net_init();
-    gt_gk_init();                       /* LAN_MULTIPLAYER: GKSession over the network (gk.c) */
+    gt_gk_init();
     eagl_init();
     al_init();
 }

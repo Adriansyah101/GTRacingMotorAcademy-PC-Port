@@ -1,46 +1,14 @@
-/* notouch.c -- NO_TOUCH_TEXT (port addition): with Touch Screen Off, the texts that say touch or tap name the
-   keyboard, mouse or pad action instead.
-
-   With Touch Screen Off (PC_CONTROLS, pcctl.c) the game is played with the keyboard, the mouse or a pad,
-   but its texts still say "Touch To Continue", "Please tap the play button.", "- Touch the car to
-   continue -" and so on.  This is not a fault of the original (it was an iPad game) nor of the port: the
-   texts were written for a touch screen.  In this mode they now name what the PC has instead:
-       touch / tap to continue        ->  press Enter to continue (with a pad: press A, or press Cross;
-                                          pcinput.c lets Cross / A start the race whatever gear up is on)
-       touch / tap the X, anywhere,   ->  click the X, click anywhere, click to ... (the pointer: the
-       here, to, license ...              mouse, or the pad's)
-       any other touch / tap          ->  press (touch and hold -> press and hold)
-       the tutorial's touch controls  ->  "Steer with A / D.", "Shift gears with Left Shift / Left Ctrl.",
-                                          "Hold V to see behind the car." (the keys of KEY_MAP, keymap.c;
-                                          with a pad, its inputs); "Please press S (brake)." /
-                                          "Please press W (accelerate)." for the Brake / Accelerate icons
-   keeping the word's case (TOUCH -> PRESS, Touch -> Press) and the -ing / -ed endings.  First made
-   "select the X"; "Touch the car to select a new one" then read "Select the car to select ...", so the
-   pointer's word, click, took its place.  Not changed: the
-   noun ("Touch Screen", the touch controls, the iPod touch), words inside markup (<font ...>), and the
-   other languages (English only; the text is left as it is).
-
-   Where: every text a gameswf text field shows goes through edit_text_character's set text, 0x4fde00
-   (this, const tu_string *text, html): the SWF's own default texts when a field is made, the game's
-   strings (SP_TOUCH_TO_CONTINUE ...) and ActionScript's.  Its instruction 0x4fde1c is replaced at
-   recompile time (recomp/codegen.py HOST_INSNS) by gt_text_filter(text), which hands back the text or a
-   changed copy; 0x4fde00 then copies it into the field as usual (and does nothing when the field already
-   shows it, so a text the game sets every frame is not laid out again).  A field made while Touch Screen
-   was On keeps its text until the game sets it again; the menus and the race make theirs as they open.
-   GT_NO_TOUCH_TEXT=0: the texts as they were. */
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "features.h"
 
 #define SLOTS 8
 #define TEXT_MAX 4096
 
-/* a tu_string as gameswf keeps a long one: byte 0 = 0xff, +4 size (with the 0), +8 capacity, +0xc the
-   characters, +0x10 the hash (low 24 bits all ones = not worked out yet) and flags */
 static struct slot {
     u8 str[0x18];
     char buf[TEXT_MAX];
@@ -62,7 +30,6 @@ static const char *word_case(const char *w, int n, const char *rep, char *out, s
     return out;
 }
 
-/* the word that starts at s (letters only), lower case, in w; its length */
 static int word_at(const char *s, char *w, int cap)
 {
     int n = 0;
@@ -75,7 +42,6 @@ static int word_at(const char *s, char *w, int cap)
     return n;
 }
 
-/* the next word after position p (spaces between), outside markup; "" at the end */
 static const char *next_word(const char *p, char *w, int cap)
 {
     while (*p == ' ')
@@ -84,7 +50,6 @@ static const char *next_word(const char *p, char *w, int cap)
     return p;
 }
 
-/* touch, touching, touched, tap, tapping, tapped: the base (0 touch, 1 tap) and the ending */
 static int touch_word(const char *w, const char **end)
 {
     static const struct { const char *w, *end; int base; } t[] = {
@@ -101,7 +66,6 @@ static int touch_word(const char *w, const char **end)
 
 static const char *ending(const char *verb, const char *end, char *out, size_t cap)
 {
-    /* press -> pressing / pressed / presses; select -> selecting / selected / selects; click -> ... */
     if (!*end)
         snprintf(out, cap, "%s", verb);
     else if (!strcmp(end, "es") || !strcmp(end, "s"))
@@ -111,7 +75,6 @@ static const char *ending(const char *verb, const char *end, char *out, size_t c
     return out;
 }
 
-/* the key (or with a pad, the pad input) an action is on: KEY_MAP's first one (keymap.c) */
 static const char *key_of(int a)
 {
     const char *k = keymap_cell(a, keymap_pad_kind() ? KM_KEYS : 0);
@@ -120,7 +83,6 @@ static const char *key_of(int a)
     return k;
 }
 
-/* the tutorial's sentences on the touch controls name the keys instead (case as written in the game) */
 static int phrases(const char *s, char *out, size_t cap)
 {
     static const struct { const char *from; int a1, a2; const char *fmt; } t[] = {
@@ -147,7 +109,6 @@ static int phrases(const char *s, char *out, size_t cap)
     return changed;
 }
 
-/* the text with its touch words changed; 0 when there were none */
 static int change(const char *s, char *out, size_t cap)
 {
     size_t o = 0;
@@ -178,7 +139,7 @@ static int change(const char *s, char *out, size_t cap)
             if (!strcmp(n1, "screen") || !strcmp(n1, "screens") || !strcmp(n1, "control") ||
                 !strcmp(n1, "controls") || !strcmp(n1, "zone") || !strcmp(n1, "area") ||
                 !strcmp(n1, "sensitivity") || !strcmp(n1, "pad") || !strcmp(n1, "button"))
-                rep = NULL;                                     /* the noun: Touch Screen ... */
+                rep = NULL;
             else if (!strcmp(n1, "to") && !strcmp(n2, "continue") && !*end) {
                 rep = "press";
                 snprintf(extra, sizeof extra, " %s", pad);
@@ -188,7 +149,7 @@ static int change(const char *s, char *out, size_t cap)
                        !strcmp(n1, "it") || !strcmp(n1, "them") || !strcmp(n1, "icons") || !strcmp(n1, "this"))
                 rep = "click";
             else
-                rep = "press";                                  /* touch and hold -> press and hold */
+                rep = "press";
         }
         if (rep) {
             char verb[24], cased[48];
@@ -218,7 +179,6 @@ static int change(const char *s, char *out, size_t cap)
     return changed;
 }
 
-/* from the generated 0x4fde00 (codegen HOST_INSNS 0x4fde1c): the text a field is given, or our copy */
 u32 gt_text_filter(u32 text)
 {
     if (on < 0) {
@@ -233,7 +193,6 @@ u32 gt_text_filter(u32 text)
     const char *s = t[0] == 0xff ? (const char *)GP(rd32(text + 0xc)) : (const char *)t + 1;
     if (!s)
         return text;
-    /* quick look: no "tou" / "tap" in any case, nothing to do */
     const char *q = s;
     for (; *q; q++) {
         char a = (char)(*q | 0x20);
@@ -257,7 +216,6 @@ u32 gt_text_filter(u32 text)
     memcpy(sl->str + 0xc, &b, 4);
     hash = (hash & 0xff000000u) | 0x00ffffffu;
     memcpy(sl->str + 0x10, &hash, 4);
-    /* each text once in the log (the game sets some every frame) */
     u32 h = 2166136261u;
     for (const char *k = s; *k; k++)
         h = (h ^ (u8)*k) * 16777619u;

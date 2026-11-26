@@ -1,12 +1,3 @@
-"""swfpatch_cashnew.py <menu.FAK> <out.FAK> -- DYNAMIC_PRICE: a NEW label on the title bar's cash.
-
-A NEW label marks the title bar's cash icon while a cash price the player has not seen is on offer.  Every
-title bar of the main menu file (the sprites placing "cashBoard": the main menu's own and the one the other menus
-share) gets "cashNew", a copy of the main menu's own "NEW!" label (the sprite NavigationMenu places as
-NotificationNew: its text SP_NAVIGATION_MENU60, yellow, slanted), smaller, over the cash icon's top left corner.
-Everything is found by name (the files number their characters differently).  host/games/gtracing/render/widescreen.c draws it only
-while host/games/gtracing/features/shop.c's shop_cash_new() says the cash rate is one the player has not seen in the shop.
-Applied after the other main menu patches, to the main menu files only."""
 import os
 import struct
 import sys
@@ -17,8 +8,8 @@ from swfpatch_exit import build_place2, parse_place2, sprite_tags  # noqa: E402
 
 PX = 20
 NAME = b'cashNew'
-SCALE = 1.6                      # NotificationNew is 2.04 in the side menu
-AT = (2, 0)                      # px from the cash board's origin (the cash icon's top left)
+SCALE = 1.6
+AT = (2, 0)
 
 
 def main():
@@ -40,7 +31,6 @@ def main():
             if p.get('name') == NAME:
                 raise SystemExit('%s: already has %s' % (src, NAME.decode()))
     if label is None or not bars:
-        # the _EdAXiF layout (the iPhone's) has no NotificationNew: left as it is, without the label
         if src != dst:
             open(dst, 'wb').write(s.d)
         print('%s: no NotificationNew (%s) or no cashBoard (%s): no %s' %

@@ -1,16 +1,3 @@
-"""Stage 2: translate every function found in stage 1 into C.
-
-Usage: python -I codegen.py <executable> <functions.json> <out_dir> [--only 0xADDR,...]
-
-Writes into out_dir:
-  funcs.h        prototypes of all F_xxxxxxxx functions
-  imports.h      prototypes of the I_name bridges the code calls (runtime, stage 3)
-  code_NNN.c     the translated functions (about 40,000 instructions per file)
-  dispatch.c     guest address -> function table, for calls through registers
-  imports.c      C name -> Mach-O import name table
-  imports_stub.c placeholder bridges (each reports the missing import), for linking now
-  codegen_report.txt
-"""
 import json
 import os
 import sys
@@ -26,30 +13,6 @@ from armc import Program, Translator, Unsupported, hx  # noqa: E402
 
 PER_FILE = 40000
 
-# Instructions whose translation the host replaces: address -> (declaration, C lines).  Used where a
-# linker --wrap cannot reach (callers in the same generated file, where clang inlines the callee).
-#   0x28d6c0 "mov r0, #0": the bloom gate, always false in the shipped game (host/games/gtracing/render/postfx.c, POSTFX)
-#   0x4fde1c "mov r0, r8" in edit_text's set text 0x4fde00 (r5 = the text): NO_TOUCH_TEXT (host/games/gtracing/features/notouch.c)
-#            hands it the text with "touch" / "tap" changed when Touch Screen is Off
-#   0x26322c "vstr s0, [r5, #8]", the last store of the menus' GetBounds 0x2630d0 (r4 = the character, r5 =
-#            the rect in screen pixels): WIDE_UI (host/games/gtracing/render/widescreen.c) puts the box where the centred stage
-#            shows it
-#   0x257244 "vldmia r0, {s3, s4, s5, s6}", the box load of the menus' 3D viewport fit 0x257200: WIDE_UI
-#            (host/games/gtracing/render/widescreen.c gt_wide_fit) hands it a box already of the screen's shape, placed as the
-#            iPad's fit places it
-#   0x2632fc "add r0, sp, #8" in the menus' clip callback 0x263240 (the box at sp + 8 before its scissor):
-#            WIDE_UI (gt_wide_clip) widens a clip of the stage's width to the screen's
-#   0x50a854 "bl 0x50a654" in gameswf's find-by-name 0x50a81c: FAST_SWF_FIND (host/games/gtracing/features/swffind.c) walks the
-#            tree natively (the same breadth-first order; GT_FAST_SWF_FIND=0 calls the original)
-#   0x166254 "movw r0, #0x1e38" in the cockpit wheel's draw 0x1660f0, after the scene took its camera's
-#            projection (the matrix at fp) and before the device loads it: WIDE_UI (host/games/gtracing/render/widescreen.c
-#            gt_wheel_proj) enlarges the wheel with the cockpit picture
-#   0x1a7588 "str r0, [r8, r4]" in GS_LoadMainMenu's loading 0x1a6c98 (r4 = 0x119c, r5 = the car table's
-#            holder): the main menu's car, G+0x119c; MENU_CAR_RANDOM (host/games/gtracing/features/menu3d.c gt_menu_car, which calls the
-#            game, so r0 .. r3 and sp go through c) may pick another
-#   0x19c384 "vmov r1, s20" in the race camera's chase views 0x19bf38 (s20 = the heading the eye's line is
-#            turned by, r8 = the camera): RACE_LOOK (host/games/gtracing/features/racelook.c gt_race_look) adds the right stick's /
-#            numpad's look angle
 HOST_INSNS = {
     0x19c384: ('float gt_race_look(u32 cam);', ['c->V.f[20] += gt_race_look(R8);', 'R1 = c->V.s[20];']),
     0x1a7588: ('void gt_menu_car(CPU *c, u32 holder);',
@@ -61,10 +24,6 @@ HOST_INSNS = {
     0x257244: ('void gt_wide_fit(u32 rect, u32 *out);', ['gt_wide_fit(R0, &c->V.s[3]);']),
     0x2632fc: ('void gt_wide_clip(u32 rect);', ['gt_wide_clip(SP + 0x8u);', 'R0 = SP + 0x8u;']),
     0x50a854: ('void gt_swf_search(CPU *c);', ['CALL_PRE(0x50a858u);', 'gt_swf_search(c);', 'CALL_POST();']),
-    # FAST_SWF_FIND's cache of searches that found nothing (GT_SWF_MISS_CACHE, pass 4 item 9): emptied when a
-    # character is made (gameswf's character constructor 0x4ca40c), and told each name given to a character (the six
-    # tu_string assignments to a character's name at +0x44, the new name's register: 0x4cb080 the _name setter,
-    # 0x4f4558.. the sprite's placing ones) so it drops the searches with that name in their path
     0x4ca410: ('extern volatile u32 gt_swf_tree_gen; extern u32 gt_swf_tree_site[8];', ['R7 = SP + 0xcu;', 'gt_swf_tree_gen++;', 'gt_swf_tree_site[0]++;']),
     0x4cb080: ('void gt_swf_named(u32 name, int site);', ['R0 = R6 + 0x44u;', 'gt_swf_named(R1, 1);']),
     0x4f4558: ('void gt_swf_named(u32 name, int site);', ['R0 = R8 + 0x44u;', 'gt_swf_named(R1, 2);']),
@@ -90,7 +49,6 @@ def _init(exe, fjson):
 
 
 def emit_function(prog, fn, md):
-    """C text of one function, plus (errors, warnings, unsupported mnemonics)."""
     tr = Translator(prog, fn)
     start, end = fn['start'], fn['end']
     body = []
@@ -176,7 +134,6 @@ def main():
     funcs = data['functions']
     if only:
         funcs = [f for f in funcs if f['start'] in only]
-    # Split into files of about PER_FILE instructions (by code size / 3).
     jobs, cur, n = [], [], 0
     for f in funcs:
         cur.append(f)

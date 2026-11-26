@@ -1,16 +1,3 @@
-"""Stage 2 function tests: whole generated functions (the real code, with its
-labels, gotos, jump-table switches, loops and returns) against Unicorn.
-
-Usage: python -I tests/functest.py <exe> <functions.json> <work_dir>
-       [--max N] [--states N] [--seed N]
-
-Leaf functions only (no calls, imports, calls through registers, tail jumps or
-SjLj labels): each is called with random arguments in r0-r3 (small integers or
-pointers into pattern memory) and a fresh stack, in the DLL (codegen output,
-ARM_TEST_MEM) and in Unicorn until it returns. Compared: r0-r11, sp, d0-d31,
-the FPSCR flags and control bits, and every written byte. A trap in both
-counts as a match; runs that hit the step limit on either side are skipped.
-"""
 import ctypes
 import json
 import os
@@ -34,7 +21,7 @@ from armc import Program  # noqa: E402
 from codegen import emit_function  # noqa: E402
 from difftest import CPU, UC_R, UC_D, pat_page, rand_f32, rand_f64, same_d, arg, is_nan32  # noqa: E402
 
-MAGIC = 0x0FFF0000          # return address: the run ends when pc gets here
+MAGIC = 0x0FFF0000
 UC_LIMIT = 1000000
 WBUF = (ctypes.c_uint32 * (1 << 20))()
 M32 = 0xFFFFFFFF
@@ -48,7 +35,7 @@ def leaf_functions(data):
         if any(k == 'tail' for _, k, _ in f.get('ctl', [])):
             continue
         if f.get('origin') in ('tail', 'split'):
-            continue            # pieces entered by a jump: they run in another function's frame
+            continue
         out.append(f)
     return out
 
@@ -106,7 +93,6 @@ class FnRunner:
         self.img_bytes = bytes(image)
 
     def changed(self):
-        """Bytes that differ from the start (no write hook: it slows loops down a lot)."""
         uc, out = self.uc, set()
         for p in self.dyn:
             cur, ref = bytes(uc.mem_read(p, 0x1000)), pat_page(p >> 12)
@@ -126,7 +112,6 @@ class FnRunner:
 
     def on_unmapped(self, uc, access, addr, size, value, user):
         if len(self.dyn) >= 1500:
-            # Pointer chasing through random memory: give up (C bails similarly).
             self.too_big = True
             uc.emu_stop()
             return False
@@ -156,7 +141,7 @@ class FnRunner:
     def run(self, f, st):
         r = self.run1(f, st)
         if r['outcome'] != 'ret':
-            self.changed()          # find what a trapped run wrote, so reset() puts it back
+            self.changed()
         return r
 
     def run1(self, f, st):
@@ -199,8 +184,8 @@ def rand_state(rng):
             regs.append(rng.randrange(0, 40))
         else:
             regs.append(rng.getrandbits(32))
-    regs.append(0x30000000 - rng.randrange(0, 256) * 16)        # sp
-    regs.append(MAGIC)                                           # lr
+    regs.append(0x30000000 - rng.randrange(0, 256) * 16)
+    regs.append(MAGIC)
     d = [rand_f32(rng) | rand_f32(rng) << 32 if i < 16 and rng.random() < 0.6 else rand_f64(rng)
          for i in range(32)]
     return regs, rng.getrandbits(4) << 28, d
@@ -228,8 +213,6 @@ def compare(dll, ucr, c, u):
     diffs = []
     for i in range(14):
         if i in (9, 12):
-            # r9 and r12 are scratch registers in the iOS ARM ABI: a callee may
-            # leave them changed, and the C function does not write them back.
             continue
         if c['r'][i] != u['r'][i]:
             diffs.append('r%d c=%08x uc=%08x' % (i, c['r'][i], u['r'][i]))
@@ -247,7 +230,6 @@ def compare(dll, ucr, c, u):
             cw = sum(dll.tm_peek(w + k) << 8 * k for k in range(4))
             uw = sum(ucr.byte(w + k) << 8 * k for k in range(4))
             if is_nan32(cw) and is_nan32(uw):
-                # A NaN made by an operation: x86 gives 0xffc00000, ARM 0x7fc00000.
                 nan_words.add(w)
                 continue
             if bad < 2:

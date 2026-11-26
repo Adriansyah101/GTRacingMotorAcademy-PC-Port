@@ -1,16 +1,3 @@
-// The Worker (../worker.js) on this PC, without a Cloudflare account: D1 is played by node:sqlite (Node 22.5+),
-// caches.default by a small in-memory cache that keeps Cache-Control's max-age.
-//
-//   node test/local.mjs test                         the Worker's own checks (prints "N of M checks failed")
-//   node test/local.mjs serve [options]              http://127.0.0.1:<port>/board and /submit for the game
-//       --port 8787          the port (loopback only)
-//       --db <file>          a SQLite file instead of memory (":memory:")
-//       --seed <n>           n made-up players to start with
-//       --status <code>      every answer is that HTTP status (429: the quota is out)
-//       --delay <ms>         every answer waits that long (a slow server: the game's timeout)
-//       --log <file>         each request (method, path, headers, body) as one JSON line
-//
-// The game: GT_CLOUD_BOARD_URL=http://127.0.0.1:8787 (board.c takes plain http only for this PC).
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync, appendFileSync } from "node:fs";
 import http from "node:http";
@@ -62,7 +49,7 @@ async function call(env, method, path, body, type = "application/json") {
   await Promise.all(pending);
   const text = await resp.text();
   let value = null;
-  try { value = JSON.parse(text); } catch { /* not JSON */ }
+  try { value = JSON.parse(text); } catch { }
   return { status: resp.status, value, headers: resp.headers };
 }
 
@@ -73,7 +60,6 @@ async function selfTest() {
   const env = makeEnv();
   const sub = (id, name, ms, car = 411) => call(env, "POST", "/submit", { player_id: id, name, car, time_ms: ms });
 
-  // the alias: board.c's selftest checks the same value (SHA-256 of "gtlb1:0123abcd")
   check(await alias("0123abcd") === "edd6d2700d", "alias(0123abcd) = " + await alias("0123abcd"));
 
   check(validName("Racer") && validName("a b") && !validName("") && !validName("   ") && !validName("x".repeat(21)) &&
@@ -111,17 +97,17 @@ async function selfTest() {
   check(rows[1]?.name === "Me faster" && rows[1]?.id === await alias("0123abcd"), "the alias, not the id");
   check(!JSON.stringify(r.value).includes("0123abcd"), "no player_id in GET");
   const hits = globalThis.caches.default.hits;
-  await sub("0123abcd", "x", 95000);                       // not better: the cache stays
+  await sub("0123abcd", "x", 95000);
   await call(env, "GET", "/board?bust=1");
   check(globalThis.caches.default.hits === hits + 1, "the second GET (any query string) from the cache");
-  await sub("0123abcd", "Me fastest", 77000);              // better: the cache entry goes
+  await sub("0123abcd", "Me fastest", 77000);
   r = await call(env, "GET", "/board");
   check(r.value.rows[0].time_ms === 77000, "a better lap shows at once");
   check(r.headers.get("cache-control") === "public, max-age=45", "max-age 45");
 
   for (let i = 0; i < 230; i++) await sub((0x10000000 + i).toString(16), "P" + i, 100000 + i);
   r = await call(env, "GET", "/board?n=2");
-  check(r.value.rows.length === 200, "the top 200 only: " + r.value.rows.length);   // (stale cache: same 4 rows?)
+  check(r.value.rows.length === 200, "the top 200 only: " + r.value.rows.length);
   check((await call(env, "PUT", "/board")).status === 405 && (await call(env, "GET", "/submit")).status === 405 &&
         (await call(env, "GET", "/")).status === 404, "405 / 404");
   const broken = { ...env, DB: { prepare() { throw new Error("D1 quota"); } } };
@@ -141,7 +127,7 @@ function serve(args) {
   const seed = +opt("seed", 0);
   for (let i = 0; i < seed; i++)
     env.DB.db.prepare("INSERT OR REPLACE INTO board VALUES (?, ?, 411, ?, ?)")
-      .run((0x50000000 + i * 7919).toString(16),                     // some "iPad"s and twins: the rows' tags
+      .run((0x50000000 + i * 7919).toString(16),
            i % 4 === 1 ? "iPad" : i % 5 === 2 ? "Twin Racer" : "Cloud " + (i + 1), 70000 + i * 1500, Date.now());
   http.createServer((req, res) => {
     const chunks = [];

@@ -1,9 +1,3 @@
-"""Read-only parser for the thin armv7 Mach-O of GT Racing Motor Academy HD.
-
-Only what the recompiler needs: segments, sections, symbols, function starts
-(with the Thumb bit ld64 puts in bit 0), the indirect symbol table that names
-each stub / lazy pointer, and helpers to read bytes and words by address.
-"""
 import struct
 
 LC_SEGMENT = 0x1
@@ -103,7 +97,6 @@ class MachO:
         self._read_indirect(dysymtab)
         self._read_function_starts(fstarts)
 
-    # address helpers
     def section(self, seg, name):
         for s in self.sections:
             if s.seg == seg and s.name == name:
@@ -140,16 +133,15 @@ class MachO:
     def u8(self, addr):
         return self.read(addr, 1)[0]
 
-    # tables
     def _read_symbols(self, symtab):
         b = self.data
         symoff, nsyms, stroff, _ = symtab
-        self.symbols = []          # (name, type, sect, desc, value)
+        self.symbols = []
         for i in range(nsyms):
             strx, ntype, nsect, ndesc, nval = struct.unpack_from('<IBBHI', b, symoff + i * 12)
             end = b.index(b'\0', stroff + strx)
             self.symbols.append((b[stroff + strx:end].decode('latin1'), ntype, nsect, ndesc, nval))
-        self.names = {}            # addr -> name (defined, non-stab)
+        self.names = {}
         for name, t, s, d, v in self.symbols:
             if t & N_STAB or (t & N_TYPE) != N_SECT:
                 continue
@@ -158,12 +150,11 @@ class MachO:
                         if not t & N_STAB and (t & N_TYPE) == N_UNDF]
 
     def _read_indirect(self, dysymtab):
-        """Map stub addresses and lazy / non-lazy pointer slots to import names."""
         b = self.data
         indoff, nind = dysymtab[12], dysymtab[13]
         ind = struct.unpack_from('<%dI' % nind, b, indoff)
-        self.stubs = {}            # stub addr -> name
-        self.ptr_slots = {}        # pointer slot addr -> name (None = local)
+        self.stubs = {}
+        self.ptr_slots = {}
         for s in self.sections:
             t = s.type
             if t == S_SYMBOL_STUBS:
@@ -180,7 +171,6 @@ class MachO:
         return self.symbols[idx][0]
 
     def _read_function_starts(self, fstarts):
-        """Return list of (addr, is_thumb); ld64 sets bit 0 for Thumb functions."""
         b = self.data
         off, size = fstarts
         text = next(g for g in self.segments if g.name == '__TEXT')

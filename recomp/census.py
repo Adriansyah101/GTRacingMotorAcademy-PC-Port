@@ -1,8 +1,3 @@
-"""Count the instructions stage 1 found, by mnemonic (without condition) and mode.
-
-Usage: python -I census.py <executable> <functions.json> [out.txt]
-Tells the code generator which instruction kinds it must handle.
-"""
 import json
 import os
 import sys
@@ -17,11 +12,10 @@ COND = ('eq', 'ne', 'hs', 'lo', 'mi', 'pl', 'vs', 'vc', 'hi', 'ls', 'ge', 'lt', 
 
 
 def base_mnemonic(ins):
-    """Mnemonic with the condition code and '.w'/'.n' removed (data type kept)."""
     m = ins.mnemonic
     parts = m.split('.')
     head = parts[0]
-    if ins.cc not in (0, 15):            # ARM_CC_INVALID / AL
+    if ins.cc not in (0, 15):
         for c in COND:
             if head.endswith(c) and head not in ('teq', 'vcmpe'):
                 head = head[:-2]

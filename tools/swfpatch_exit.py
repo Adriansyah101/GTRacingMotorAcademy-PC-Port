@@ -1,21 +1,3 @@
-"""swfpatch_exit.py <menu.FAK> <out.FAK> [--png preview.png] -- EXIT_BUTTON: an Exit button on the main menu.
-
-The original has no way to leave the game (on the iPad the Home button did that).  This adds btnPCExit to
-NavigationMenu's bottom-left bar, right of the gear (btnSettings), where the original only ever shows
-btnCashbonus when Gameloft's ad server offers free cash (0x33a0c8; never offline).  host/games/gtracing/features/exitbtn.c takes
-its click: a YES / NO popup, then the game ends as when the window is closed.
-
-The button is a copy of the gear button's sprite (its Idle / Hide / Show / Clicked / pressToClick frames,
-its hitzone, its press animation and click sound), with:
-  - the tile: a new bitmap (DefineBitsLossless2, drawn here) in place of the gear's atlas picture: the
-    same yellow tile (colours sampled from the game's gear tile on screen) with a white power
-    symbol instead of the gears;
-  - the press's last action (PushMenu AllOptionsMenu, i.e. what the gear opens) replaced by
-    gotoAndStop("Idle").
-It is placed wherever btnSettings is (NavigationMenu frame 1 on, and the bar sprite NavigationMenu shows
-on frame 0), 79 px to the right: the gap between the LIVE and gear tiles again, which ends the tile at the
-bar's right edge (232 px).  Every later change of btnSettings' depth (its fade in Hide / Show) is done to
-ours too.  Applied after swfpatch_controls.py, to the main menu files only."""
 import math
 import os
 import struct
@@ -26,17 +8,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from swfpatch_controls import BR, BW, Swf, tag, tags  # noqa: E402
 
 PX = 20
-DX = 79 * PX                       # btnSettings -> btnPCExit
+DX = 79 * PX
 NAME = 'btnPCExit'
 
-# the picture
-# The tile in the tile sprite's space (where the gear's 541 draws its 540), stage px: measured on a
-# 1441 x 1079 screenshot of the gear tile (black border 111.5 .. 218.5, 968 .. 1066 screen px)
-TILE = (0.8, 0.3, 76.8, 69.9)      # x0 y0 x1 y1
-RES = 2                            # bitmap pixels per stage pixel
-PAD = 1                            # transparent bitmap pixels round the tile
-RADIUS, BORDER = 6.5, 2.1         # outer corner radius, black border (stage px)
-GLOSS = 0.563                      # the light / deep yellow edge, of the inner height
+TILE = (0.8, 0.3, 76.8, 69.9)
+RES = 2
+PAD = 1
+RADIUS, BORDER = 6.5, 2.1
+GLOSS = 0.563
 UPPER = [(0.00, 0xfcf2c8), (0.04, 0xfde6b2), (0.10, 0xfdd696), (0.15, 0xfdc979), (0.20, 0xfdc979),
          (0.35, 0xfdcf83), (0.45, 0xfcd386), (0.53, 0xf6d288), (GLOSS, 0xf0cc7a)]
 LOWER = [(GLOSS, 0xfcb60f), (0.64, 0xfcba0f), (0.75, 0xfcc40f), (0.84, 0xfcce0f), (0.90, 0xfcd40f),
@@ -64,9 +43,8 @@ def sd_round_rect(x, y, cx, cy, hw, hh, r):
 
 
 def sd_power(x, y):
-    """the power symbol, centred on 0,0 (stage px): an open ring and a bar through its gap"""
     rmid, th, gap = 18.5, 7.0, math.radians(40)
-    a = math.atan2(x, -y)                         # 0 straight up
+    a = math.atan2(x, -y)
     if abs(a) > gap:
         d_ring = abs(math.hypot(x, y) - rmid) - th / 2
     else:
@@ -82,7 +60,6 @@ def cover(d, px):
 
 
 def blur(a, w, h, r):
-    """three box passes each way (about a Gaussian)"""
     for _ in range(3):
         for horiz in (True, False):
             out = [0.0] * (w * h)
@@ -102,7 +79,6 @@ def blur(a, w, h, r):
 
 
 def picture():
-    """(width, height, rgba bytes): the tile, straight alpha"""
     x0, y0, x1, y1 = TILE
     w = int(round((x1 - x0) * RES)) + 2 * PAD
     h = int(round((y1 - y0) * RES)) + 2 * PAD
@@ -110,8 +86,7 @@ def picture():
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     hw, hh = (x1 - x0) / 2, (y1 - y0) / 2
     in_top, in_h = y0 + BORDER, (y1 - y0) - 2 * BORDER
-    sym_cy = cy + 3.0                             # the symbol's ink is centred on the tile
-    # the symbol's shadow (dark brown, as round the gears), blurred
+    sym_cy = cy + 3.0
     sh = [0.0] * (w * h)
     for j in range(h):
         for i in range(w):
@@ -129,11 +104,9 @@ def picture():
                 continue
             t = (y - in_top) / in_h
             t = min(max(t, 0.0), 1.0)
-            # the gloss edge, anti-aliased
             f = min(max((t - GLOSS) / (px / in_h) + 0.5, 0.0), 1.0)
             cu, cl = rgb(ramp(UPPER, min(t, GLOSS))), rgb(ramp(LOWER, max(t, GLOSS)))
             col = [cu[k] * (1 - f) + cl[k] * f for k in range(3)]
-            # the symbol: shadow, grey rim, white face (a touch greyer at the bottom)
             s = sh[j * w + i] * 0.55
             col = [c * (1 - s) + v * s for c, v in zip(col, (70, 48, 18))]
             d_sym = sd_power(x - cx, y - sym_cy)
@@ -142,8 +115,7 @@ def picture():
             face = cover(d_sym, px)
             g = 255 - 22 * min(max((y - (sym_cy - 26)) / 50, 0), 1)
             col = [c * (1 - face) + g * face for c in col]
-            # the black border
-            b = cover(d_out + BORDER, px)             # 1 inside the border's inner edge
+            b = cover(d_out + BORDER, px)
             col = [c * b for c in col]
             out += bytes([int(round(min(max(c, 0), 255))) for c in col] + [int(round(a_out * 255))])
     return w, h, bytes(out)
@@ -158,7 +130,6 @@ def png(path, w, h, rgba):
                            chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
-# SWF records
 def sbits(*vals):
     return max(max(abs(v) for v in vals).bit_length() + 1, 1)
 
@@ -214,7 +185,6 @@ def read_cxform(b, k):
 
 
 def parse_place2(b):
-    """PlaceObject2 -> dict of its fields (cxform kept as bytes)"""
     p = {'flags': b[0], 'depth': struct.unpack_from('<H', b, 1)[0]}
     k = 3
     f = p['flags']
@@ -235,7 +205,7 @@ def parse_place2(b):
     if f & 64:
         p['clip'] = b[k:k + 2]
         k += 2
-    p['tail'] = b[k:]                             # clip actions, kept as they are
+    p['tail'] = b[k:]
     return p
 
 
@@ -267,38 +237,35 @@ def rect_bytes(x0, x1, y0, y1):
 
 
 def bitmap_shape(sid, bid, x0, y0, x1, y1, scale):
-    """DefineShape: the rectangle x0..x1, y0..y1 (twips) filled with bitmap bid (clipped), scale twips per
-    bitmap pixel, its top left at x0, y0"""
     body = struct.pack('<H', sid) + rect_bytes(x0, x1, y0, y1)
     body += bytes([1, 0x41]) + struct.pack('<H', bid) + matrix_bytes((scale * 65536, scale * 65536, 0, 0, x0, y0))
-    body += bytes([0])                            # no line styles
+    body += bytes([0])
     w = BW()
-    w.u(1, 4)                                     # fill bits
-    w.u(0, 4)                                     # line bits
-    w.u(0, 1)                                     # style change: fill 1, move to x0, y0
+    w.u(1, 4)
+    w.u(0, 4)
+    w.u(0, 1)
     w.u(0, 1); w.u(0, 1); w.u(1, 1); w.u(0, 1); w.u(1, 1)
     n = sbits(x0, y0)
     w.u(n, 5)
     w.u(x0 & ((1 << n) - 1), n)
     w.u(y0 & ((1 << n) - 1), n)
-    w.u(1, 1)                                     # fill style 1 = 1 (inside, drawn clockwise)
+    w.u(1, 1)
     for dx, dy in ((x1 - x0, 0), (0, y1 - y0), (x0 - x1, 0), (0, y0 - y1)):
-        w.u(1, 1); w.u(1, 1)                      # edge, straight
+        w.u(1, 1); w.u(1, 1)
         n = max(sbits(dx, dy), 2)
         w.u(n - 2, 4)
-        w.u(0, 1)                                 # not general: vertical or horizontal
+        w.u(0, 1)
         if dx:
             w.u(0, 1)
             w.u(dx & ((1 << n) - 1), n)
         else:
             w.u(1, 1)
             w.u(dy & ((1 << n) - 1), n)
-    w.u(0, 6)                                     # end
+    w.u(0, 6)
     return tag(2, body + w.done())
 
 
 def lossless2(bid, w, h, rgba):
-    """DefineBitsLossless2, 32-bit ARGB (premultiplied, as the SWF format has it)"""
     argb = bytearray()
     for k in range(0, len(rgba), 4):
         r, g, b, a = rgba[k:k + 4]
@@ -313,7 +280,6 @@ def sprite_tags(body):
 def main():
     src, dst = sys.argv[1], sys.argv[2]
     s = Swf(open(src, 'rb').read())
-    # the sprites that place btnSettings (NavigationMenu and its frame-0 bar), the gear's sprite
     users, gear, tile_sprite = [], None, None
     for sid, body in s.sprites.items():
         for c, b, _ in sprite_tags(body):
@@ -322,7 +288,6 @@ def main():
                 gear = parse_place2(b)['char']
     if not users:
         raise SystemExit('no btnSettings in %s' % src)
-    # the gear sprite's tile: the sprite at depth 1 of its first frame, and the shape that sprite shows
     for c, b, _ in sprite_tags(s.sprites[gear]):
         if c == 26 and b[0] & 2 and parse_place2(b)['depth'] == 1:
             tile_sprite = parse_place2(b)['char']
@@ -347,7 +312,6 @@ def main():
             tag(39, struct.pack('<HH', tid, 1) +
                 build_place2({'flags': 0x06, 'depth': 1, 'char': shid, 'matrix': (65536, 65536, 0, 0, 0, 0)}) +
                 tag(1, b'') + tag(0, b''))]
-    # the button: the gear's frames, our tile, no PushMenu
     sid, frames = struct.unpack_from('<HH', s.sprites[gear])
     new, pushes = [], 0
     for c, b, r in sprite_tags(s.sprites[gear]):
@@ -359,19 +323,18 @@ def main():
                 continue
         if c == 12 and b'PushMenu' in b:
             pushes += 1
-            new.append(tag(12, b'\x8c\x05\x00Idle\x00\x07\x00'))   # GotoLabel "Idle"; Stop
+            new.append(tag(12, b'\x8c\x05\x00Idle\x00\x07\x00'))
             continue
         new.append(r)
     if pushes != 1:
         raise SystemExit('the gear sprite %d: %d PushMenu actions (1 expected)' % (gear, pushes))
     defs.append(tag(39, struct.pack('<HH', xid, frames) + b''.join(new)))
 
-    # btnPCExit wherever btnSettings is, at a free depth above it; btnSettings' later changes copied
     first_user = min(users)
     out = []
     for code, body, raw in s.top:
         if code == 39 and struct.unpack_from('<H', body)[0] == first_user:
-            out += defs                                   # defined before their first user
+            out += defs
         if code == 39 and struct.unpack_from('<H', body)[0] in users:
             usid, uframes = struct.unpack_from('<HH', body)
             ts = sprite_tags(body)

@@ -1,4 +1,3 @@
-# GT Racing PC port: the Red Bull Time Trial's cloud leaderboard (see worker.js and README.md in this folder).
 name = "gt-redbull-board"
 main = "worker.js"
 compatibility_date = "2026-11-01"
@@ -9,9 +8,6 @@ database_name = "gt-redbull-board"
 database_id = "35eca2af-649c-4190-a78b-2994bdcb2ebd"
 
 [vars]
-MIN_LAP_MS = "50000"      # a lap faster than this is refused (a fast real lap on the F1 RB8, France Raceway: 75868)
+MIN_LAP_MS = "50000"
 MAX_LAP_MS = "600000"
-CACHE_SECONDS = "45"      # GET /board in the edge cache, 30 .. 60
-
-# The edge cache (caches.default) works on a route of your own domain, not on *.workers.dev:
-# routes = [{ pattern = "board.example.com", custom_domain = true }]
+CACHE_SECONDS = "45"

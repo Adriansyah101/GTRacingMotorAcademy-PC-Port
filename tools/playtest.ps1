@@ -1,36 +1,3 @@
-<#
-playtest.ps1 -- the port's regression run: --selftest, then scripted game runs on a temporary copy of a save, each
-log checked.  Nothing is typed or clicked on the desktop: every input is the game's own test switches (GT_TAPS,
-GT_KEYNAV, GT_PADNAV, GT_PEDALS, GT_TEST_MENU ...), so the PC stays usable while it runs (a game window opens and
-closes for each scenario).
-
-  powershell -ExecutionPolicy Bypass -File tools\playtest.ps1 [-Scenario menu,display,...] [-Save <save folder>]
-             [-Exe <gtracing.exe>] [-Keep] [-NoPrivacy] [-List]
-
-The exe is the development build (host/build.py without --release): the test switches are diagnostic keys, which a
-release build does not read (GT_DEV, host/core/rt.h).
-
-Every run:
-  - copies the save (-Save, default build\host\home: <home>\Documents and <home>\Library) to a new folder in %TEMP%
-    and points GT_HOME there, so the save itself is never written;
-  - uses its own gtracing.ini in that folder (GT_INI): a 1024 x 768 window, the cloud leaderboard off
-    (GT_CLOUD_BOARD=0, nothing reaches the server), no throttling in the background;
-  - logs to build\playtest\<time>\<scenario>.log (GT_LOG; screenshots there too, GT_SHOT_DIR), with GT_BENCH spans
-    and GT_SPIKE_MS=18 (frames slower than 18 ms, reported, not failed);
-  - fails on a fault, a crash, an uncaught exception, a GL shader error, a log line holding this PC's user name,
-    PC name or user folder, or an expected log line that did not come;
-  - checks the layer boundary after --selftest (tools\layer_check.py: the shims reach the game only through
-    shims\game_hooks.h);
-  - ends with the privacy check (-NoPrivacy skips it): a run crashed on purpose (GT_CRASH_TEST) writes its minidump,
-    then tools\privacy_scan.py searches that dump, its log, both builds' exes (unstripped, so with their debug
-    info) and what a release is made of (tools\release\, build\release\ but its symbols and private folders) for
-    this PC's user name, PC name and host name, Git's user name and e-mail, the user folder, C:\Users and the
-    project's folder;
-  - removes the temporary folder afterwards (-Keep leaves it).
-The routes are taps in stage points (the game's 1024 x 768 menu space) and frame numbers, made on copies of the
-developer's saves; a save whose menus differ (a popup that is not there, another car) can make a route miss: its
-expected lines then say where.  A game already running stops the run (it would share the log and the window).
-#>
 param(
     [string[]]$Scenario = @(),
     [string]$Save = "",
@@ -44,11 +11,7 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if (-not $Exe) { $Exe = Join-Path $root 'build\host\gtracing.exe' }
 if (-not $Save) { $Save = Join-Path $root 'build\host\home' }
 
-# the scenarios
-# env: the game's test switches for the run; expect: regular expressions that must each match a log line, in order;
-# also: ones that must match somewhere (the bench's lines come when their span ends); quit: the frame the game
-# closes at.  Frames are counted from the start (the title screen is up at about 50).
-$common_taps_play = '1500:512,300'                       # the title screen's PLAY
+$common_taps_play = '1500:512,300'
 $drag_route = '1500:512,300;1800:730,480;2000:120,486,20,120,376;2350:438,500;2600:954,690;3000:940,690;4000:512,480;4400:512,480'
 $scenarios = [ordered]@{
     'menu' = @{
@@ -80,9 +43,6 @@ $scenarios = [ordered]@{
                    '\[postfx\] Classic Natural \(Options > Display\)', '\[postfx\] off \(Options > Display\)',
                    '\[postfx\] Enhanced \(Options > Display\)', '\[blur\] the blur target [0-9]+ x [0-9]+ -> [0-9]+ x [0-9]+',
                    '\[blur\] the blur target [0-9]+ x [0-9]+ -> [0-9]+ x [0-9]+')
-        # the autopilot (GT_TEST_AUTOPILOT) drives the Speed Ring's straights at full speed, so the motion blur is drawn
-        # (it needs about 160 km/h) and its shader patched (gt_blur_light) in every run; Simple Race's first track with
-        # traffic and the pedals alone reached it in some runs only
         also   = @('\[bench\] frames 7600-10400: [0-9.]+ fps', '\[blur\] the motion blur shader given gt_blur_light')
     }
     'mycars' = @{
@@ -117,7 +77,7 @@ if ($List) {
     'privacy  a forced crash''s minidump and log, both exes: tools\privacy_scan.py (always last; -NoPrivacy skips it)'
     return
 }
-$Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ })   # -File passes a, b as one word
+$Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if (-not $Scenario.Count) { $Scenario = @($scenarios.Keys) }
 foreach ($s in $Scenario) { if (-not $scenarios.Contains($s)) { throw "no scenario '$s' (-List shows them)" } }
 if (-not (Test-Path $Exe)) { throw "no exe at $Exe" }
@@ -129,14 +89,12 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $tmp = Join-Path $env:TEMP ('gt-playtest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $tmp | Out-Null
 
-# what a log must never hold: this PC's names and the user's folder (the log scrubs them to %USER%, %PC% ...)
 $private = @($env:USERNAME, $env:COMPUTERNAME, $env:USERPROFILE) | Where-Object { $_ -and $_.Length -ge 3 }
 $bad = '^\[FAULT\]|^\[FATAL\]|^\[crash\] wrote|uncaught (C\+\+|Objective-C) exception|did not (compile|link)|GL error'
 
 $ini = Join-Path $tmp 'gtracing.ini'
 @('# playtest.ps1: a window, the cloud leaderboard off', 'GT_FULLSCREEN=0', 'GT_WIDE=1024', 'GT_RESOLUTION=768',
   'GT_CLOUD_BOARD=0', 'GT_BACKGROUND_THROTTLE=0', 'GT_MENU_CAR_RANDOM=0') | Out-File $ini -Encoding ascii
-# the switches a scenario may set: cleared for every run, so one run's do not reach the next
 $switches = 'GT_TAPS', 'GT_KEYNAV', 'GT_PADNAV', 'GT_PEDALS', 'GT_TEST_MENU', 'GT_BENCH', 'GT_REPLAY_PADTEST', 'GT_PAUSE',
             'GT_CAM', 'GT_WHEEL', 'GT_SHOTS', 'GT_POSTFX', 'GT_FULL_BLUR', 'GT_TEST_DISPLAY', 'GT_TEST_AUTOPILOT'
 $base = @{ GT_INI = $ini; GT_CLOUD_BOARD = '0'; GT_SPIKE_MS = '18'; GT_SHOT_DIR = $out; GT_PADMENU_LOG = '0' }
@@ -181,7 +139,6 @@ function Test-Log([string]$log, [string[]]$expect, [string[]]$also = @()) {
 
 $results = @()
 try {
-    # 1. --selftest
     $h = Join-Path $tmp 'home_selftest'
     New-Item -ItemType Directory $h | Out-Null
     $r = Invoke-GameRun 'selftest' @{ GT_HOME = $h } @('--selftest') 120
@@ -197,7 +154,6 @@ try {
                                        note = $lines[-1]; why = $(if ($ok) { @() } else { $lines }) }
     }
 
-    # 2. the game runs
     foreach ($s in $Scenario) {
         $sc = $scenarios[$s]
         $h = Join-Path $tmp "home_$s"
@@ -214,7 +170,6 @@ try {
         if (-not $Keep) { Remove-Item $h -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    # 3. privacy: a forced crash's minidump and log, and both builds' exes (unstripped), scanned
     if (-not $NoPrivacy) {
         $h = Join-Path $tmp 'home_crash'
         New-Item -ItemType Directory $h | Out-Null

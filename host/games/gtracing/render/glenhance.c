@@ -1,34 +1,9 @@
-/* glenhance.c -- MSAA (anti-aliasing) and ANISOTROPIC (texture filtering): picture enhancements the
-   iPad could not afford.
-   Enhancements, not port faults; both on by default.
-
-   MSAA.  The game draws everything into one framebuffer object of its own (the "main" one), whose colour
-   renderbuffer gets the layer's storage (eagl.c c_storage) and is shown by presentRenderbuffer:.  It also
-   renders into textures through other framebuffers (0x2a47a8..: a texture plus a depth/stencil
-   renderbuffer), so the game's own renderbuffers are left single-sampled: a multisampled renderbuffer
-   beside a texture would make those framebuffers incomplete.  Instead the host keeps a framebuffer of its
-   own (colour RGBA8 + depth24/stencil8, n samples, the drawable's size) and binds it whenever the game
-   binds its main framebuffer; eagl.c's present resolves it straight into its window texture.  What the game
-   asks about the main framebuffer stays the main one's: the binding it reads back (glGetIntegerv), the
-   attachments it sets or queries, and glReadPixels (resolved into the main one first).
-   GT_MSAA=n samples (default 4, capped by GL_MAX_SAMPLES; 0 or 1 = off, the original).  GPU_PROFILE (optimisation pass 5):
-   missing, blank or "auto" = GPU_PROFILE's choice (gpuprofile.c: 4 on any GPU, never 8).
-
-   ANISOTROPIC.  The game already asks for min(GL_MAX_TEXTURE_MAX_ANISOTROPY, 16) on the textures it
-   loads through 0x1515f0 (it finds GL_EXT_texture_filter_anisotropic in the extension string gles.c
-   gives it); here every mipmapped texture gets it: a mipmap minifying filter, glGenerateMipmap, or a
-   mipmap level uploaded.  GT_ANISOTROPIC=n (default 16, capped by the driver; the game's own requests
-   are set to it too; 1 = off, the game's requests included; 0 = the game's own).
-
-   DISPLAY_MENU: Options > Display changes both while the game runs (glx_set_msaa /
-   glx_set_aniso, taken at a frame's end: eagl.c glx_frame_end); the textures that got a level get the new
-   one. */
 #include <stdlib.h>
 
 #include "gl.h"
 #include "features.h"
 
-#define FB_BINDING      0x8CA6u   /* GL_FRAMEBUFFER_BINDING (= draw binding) */
+#define FB_BINDING      0x8CA6u
 #define READ_FB_BINDING 0x8CAAu
 #define READ_FB         0x8CA8u
 #define DRAW_FB         0x8CA9u
@@ -37,23 +12,18 @@
 #define MAX_ANISO       0x84FFu
 #define DEPTH24_STENCIL8 0x88F0u
 
-
-/* MSAA */
-
 static int samples = -1, max_samples;
-static int pending_samples = -1;      /* DISPLAY_MENU: a new count, taken at the frame's end */
+static int pending_samples = -1;
 static u32 main_fbo, ms_fbo, ms_color, ms_depth;
 static SDL_GLContext main_ctx;
 static int ms_w, ms_h, ms_failed;
 
-/* the colour renderbuffers attached so far: the main framebuffer is the one holding the drawable's */
 static struct { u32 fbo, rb; SDL_GLContext ctx; } color_att[16];
 static int ncolor_att;
 
 static int want_samples(void)
 {
     if (samples < 0) {
-        /* GPU_PROFILE (gpuprofile.c, pass 5): missing, blank or "auto" = the profile's (4) */
         int n = gpu_setting_auto("GT_MSAA") ? gpu_auto_msaa() : rt_setting_int("GT_MSAA", gpu_auto_msaa(), 0, 64), mx = 0;
         p_glGetIntegerv(MAX_SAMPLES, GA(&mx));
         max_samples = mx;
@@ -73,7 +43,6 @@ static u32 raw_binding(u32 which)
     return v;
 }
 
-/* the host's framebuffer, made or resized to the drawable; 1 when it is in use on this context */
 static int ms_ready(void)
 {
     if (!main_fbo || ms_failed || SDL_GL_GetCurrentContext() != main_ctx || !want_samples())
@@ -111,12 +80,10 @@ static int ms_ready(void)
     ms_h = h;
     rt_log("[msaa] framebuffer %u: %d x %d, %d samples, in place of the game's %u\n", ms_fbo, w, h, samples,
            main_fbo);
-    /* if the game has its main framebuffer bound now, its drawing goes to this one from here on */
     gles_bind_fb(GL_FRAMEBUFFER, old_fb == main_fbo ? ms_fbo : old_fb);
     return 1;
 }
 
-/* the drawable's storage (eagl.c): find the framebuffer holding it */
 void glx_drawable_changed(u32 rb)
 {
     if (!main_fbo)
@@ -130,13 +97,11 @@ void glx_drawable_changed(u32 rb)
         ms_ready();
 }
 
-/* the framebuffer eagl.c presents from, 0 = the drawable renderbuffer as on the iPad */
 u32 glx_present_fbo(void)
 {
     return ms_fbo && ms_w && samples > 0 && !ms_failed && SDL_GL_GetCurrentContext() == main_ctx ? ms_fbo : 0;
 }
 
-/* what the game reads back as the bound framebuffer */
 u32 glx_logical_fbo(u32 raw)
 {
     return raw && raw == ms_fbo && glx_present_fbo() ? main_fbo : raw;
@@ -144,13 +109,12 @@ u32 glx_logical_fbo(u32 raw)
 
 void h_glBindFramebuffer(u32 target, u32 fb)
 {
-    softrefl_bind_fb(fb);       /* SOFT_REFLECTION: the cars' reflection map drawn (softrefl.c) */
+    softrefl_bind_fb(fb);
     if (fb && fb == main_fbo && ms_ready())
         fb = ms_fbo;
     gles_bind_fb(target, fb);
 }
 
-/* a call about the game's main framebuffer while the host's stands in for it: made on the main one */
 #define ON_MAIN(call)                                                         \
     do {                                                                      \
         int swap_ = ms_fbo && raw_binding(FB_BINDING) == ms_fbo;              \
@@ -200,7 +164,6 @@ void h_glReadPixels(u32 x, u32 y, u32 w, u32 h, u32 format, u32 type, u32 out)
         p_glReadPixels(x, y, w, h, format, type, out);
         return;
     }
-    /* the samples resolved into the game's own renderbuffer, read from there */
     gles_bind_fb(READ_FB, ms_fbo);
     gles_bind_fb(DRAW_FB, main_fbo);
     p_glBlitFramebuffer(0, 0, (u32)ms_w, (u32)ms_h, 0, 0, (u32)ms_w, (u32)ms_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
@@ -209,15 +172,10 @@ void h_glReadPixels(u32 x, u32 y, u32 w, u32 h, u32 format, u32 type, u32 out)
     gles_bind_fb(GL_FRAMEBUFFER, ms_fbo);
 }
 
-/* anisotropic filtering */
-
-/* aniso: > 1 every mipmapped texture gets it (also those the game asks for itself, raised or lowered to
-   it); 1 = off (the game's own requests lowered to 1 too, DISPLAY_MENU's "Off"); 0 = the game's own
-   (GT_ANISOTROPIC=0) */
 static float aniso = -1, max_aniso;
 static float pending_aniso = -1;
 static unsigned aniso_game, aniso_host;
-static u8 aniso_seen[65536 / 8];        /* the textures given a level (re-set when the level changes) */
+static u8 aniso_seen[65536 / 8];
 #define TEX_BINDING_2D 0x8069u
 
 static float aniso_level(float n)
@@ -288,14 +246,11 @@ void h_glGenerateMipmap(u32 target)
     set_aniso(target);
 }
 
-/* gles.c: a texture level was uploaded (level > 0: the texture has mipmaps) */
 void glx_tex_level(u32 target, u32 level)
 {
     if (level == 1)
         set_aniso(target);
 }
-
-/* DISPLAY_MENU (display.c): changed while the game runs */
 
 int glx_msaa_now(void) { return samples > 0 ? samples : 0; }
 int glx_msaa_max(void) { return max_samples; }
@@ -304,7 +259,6 @@ float glx_aniso_max(void) { return max_aniso; }
 void glx_set_msaa(int n) { pending_samples = n < 0 ? 0 : n; }
 void glx_set_aniso(float n) { pending_aniso = n < 0 ? 0 : n; }
 
-/* eagl.c, after a frame is shown: a frame is drawn wholly with one framebuffer */
 void glx_frame_end(void)
 {
     if (pending_samples >= 0 && max_samples && SDL_GL_GetCurrentContext() == main_ctx) {
@@ -313,11 +267,11 @@ void glx_frame_end(void)
         n = n > 1 ? n : 0;
         if (n != samples) {
             samples = n;
-            ms_w = ms_h = 0;                    /* the host's framebuffer gets its new storage */
+            ms_w = ms_h = 0;
             ms_failed = 0;
             u32 cur = raw_binding(FB_BINDING);
             if (samples)
-                ms_ready();                     /* binds it if the game's main one is bound now */
+                ms_ready();
             else if (cur == ms_fbo)
                 gles_bind_fb(GL_FRAMEBUFFER, main_fbo);
             rt_log(samples ? "[msaa] now %d samples\n" : "[msaa] now off\n", samples);
@@ -328,7 +282,6 @@ void glx_frame_end(void)
         pending_aniso = -1;
         if (n != aniso) {
             aniso = n;
-            /* the textures that had a level: the new one (1 when off) */
             u32 active = 0, was = 0, count = 0;
             p_glGetIntegerv(GL_ACTIVE_TEXTURE, GA(&active));
             p_glActiveTexture(GL_TEXTURE0);

@@ -1,11 +1,11 @@
-/* selftest.c -- checks of the host's Foundation through the same message paths the game uses
-   (gtracing.exe --selftest, after the image is loaded).  Prints each failure and a count. */
+
+
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "game_hooks.h"
 #include "gl.h"
@@ -17,14 +17,14 @@ u32 h_NSSearchPathForDirectoriesInDomains(u32 dir, u32 mask, u32 expand);
 
 static int fails, checks;
 
-/* the file's bare name: __FILE__ was its whole path, the Windows user's folder in the exe */
+
 #define CHECK(cond, ...) do { checks++; if (!(cond)) { fails++; rt_log("[selftest] FAIL selftest.c:%d: ", __LINE__); rt_log(__VA_ARGS__); rt_log("\n"); } } while (0)
 
 static u32 cls(const char *n) { return ns_class(n); }
 static id S(const char *s) { return ns_string(s); }
 static int streq(id s, const char *want) { return s && !strcmp(ns_utf8(s), want); }
 
-/* a message with up to 6 argument words */
+
 static u32 M(id self, const char *sel, int n, ...)
 {
     u32 a[6] = {0};
@@ -36,7 +36,7 @@ static u32 M(id self, const char *sel, int n, ...)
     return objc_msg(self, sel, n, a);
 }
 
-/* a struct-returning message through objc_msgSend_stret, as the game sends it */
+
 static void stret(u32 *out, id self, const char *sel, int n, const u32 *args)
 {
     CPU *c = rt_cpu();
@@ -56,7 +56,7 @@ static void stret(u32 *out, id self, const char *sel, int n, const u32 *args)
     *c = save;
 }
 
-/* NSString formats get their words as the variadic part */
+
 static id fmt(const char *f, int n, const u32 *w)
 {
     Buf b = {0};
@@ -70,7 +70,7 @@ static id fmt(const char *f, int n, const u32 *w)
 static void strings(void)
 {
     u32 w1[] = {S("abc"), 42, 7, 0, (u32)d2bits(3.14159), (u32)(d2bits(3.14159) >> 32)};
-    /* %@ %d %lld %.2f: the 64-bit values take two words, no alignment */
+
     u64 ll = 1234567890123ull;
     u32 w2[] = {S("x"), (u32)-5, (u32)ll, (u32)(ll >> 32), (u32)d2bits(2.5), (u32)(d2bits(2.5) >> 32), GA("cs")};
     id s = fmt("%@ %d %lld %.2f %s", 7, w2);
@@ -121,7 +121,7 @@ static void strings(void)
     id ws = M(cls("NSCharacterSet"), "whitespaceAndNewlineCharacterSet", 0);
     CHECK(streq(M(S(" \t hi \n"), "stringByTrimmingCharactersInSet:", 1, ws), "hi"), "trimming");
 
-    /* UTF-8 with a non-ASCII character: indices count UTF-16 units */
+
     id u = S("caf\xC3\xA9!");
     CHECK(M(u, "length", 0) == 5, "non-ASCII length %u", M(u, "length", 0));
     CHECK(M(u, "characterAtIndex:", 1, 3) == 0xE9, "non-ASCII characterAtIndex");
@@ -156,7 +156,7 @@ static void collections(void)
     M(a, "removeObjectAtIndex:", 1, 0);
     CHECK(M(a, "count", 0) == 2 && streq(M(a, "lastObject", 0), "pear"), "removeObjectAtIndex");
 
-    /* fast enumeration as the compiler emits it: state struct, itemsPtr */
+
     u32 state[8] = {0}, buf[16];
     u32 n = M(a, "countByEnumeratingWithState:objects:count:", 3, GA(state), GA(buf), 16);
     CHECK(n == 2 && rd32(state[1]) == ns_array_at(a, 0), "fast enumeration");
@@ -190,7 +190,7 @@ static void collections(void)
     M(set, "addObject:", 1, S("b"));
     CHECK(M(set, "count", 0) == 2 && (M(set, "containsObject:", 1, S("b")) & 1), "NSSet");
 
-    /* property list round trip through a file in the home folder */
+    
     id root = M(cls("NSMutableDictionary"), "dictionary", 0);
     M(root, "setObject:forKey:", 2, S("text <&>"), S("s"));
     M(root, "setObject:forKey:", 2, ns_num_ll(-7), S("i"));
@@ -243,14 +243,14 @@ static void sys_checks(void)
     double t0 = ns_date_value(M(cls("NSDate"), "date", 0));
     CHECK(t0 > 7e8 && t0 < 2e9, "NSDate now %.0f", t0);
 
-    /* a thread (pthread_create -> host entry -> message on the new thread's own guest stack) */
+    
     id box = M(cls("NSMutableArray"), "array", 0);
     M(cls("NSThread"), "detachNewThreadSelector:toTarget:withObject:", 3, sel_get("addObject:"), box, S("from thread"));
     for (int i = 0; i < 200 && ns_array_count(box) == 0; i++)
         Sleep(5);
     CHECK(ns_array_count(box) == 1 && streq(ns_array_at(box, 0), "from thread"), "NSThread detach");
 
-    /* a repeating timer on this thread's run loop: the timer passes itself to addObject: */
+
     id ticks = M(cls("NSMutableArray"), "array", 0);
     double iv = 0.01;
     u32 targs[6] = {(u32)d2bits(iv), (u32)(d2bits(iv) >> 32), ticks, sel_get("addObject:"), 0, 1};
@@ -267,7 +267,7 @@ static void sys_checks(void)
     CHECK(ns_array_count(ticks) == before, "invalidated timer stays quiet");
 }
 
-/* an import through its generated bridge, with the argument words as the game passes them */
+
 static u32 imp(const char *name, int n, const u32 *w)
 {
     RtBridge fn = rt_bridge_by_name(name);
@@ -298,7 +298,7 @@ static void coregraphics(void)
     imp("_CGAffineTransformMakeRotation", 2, w1);
     CHECK(feq(t[0], 0) && feq(t[1], 1) && feq(t[2], -1) && feq(t[3], 0), "MakeRotation gave %g %g %g %g",
           t[0], t[1], t[2], t[3]);
-    /* Concat(scale 2, translate 10,20): the second operand's words are on the stack */
+
     float u[6] = {0};
     u32 w2[] = {GA(u), FB(2), 0, 0, FB(2), 0, 0, FB(1), 0, 0, FB(1), FB(10), FB(20)};
     imp("_CGAffineTransformConcat", 13, w2);
@@ -316,7 +316,7 @@ static void coregraphics(void)
     u32 w5[] = {FB(-4), FB(0), FB(-6), FB(1)};
     CHECK(bits2f(imp("_CGRectGetMinX", 4, w5)) == -10 && bits2f(imp("_CGRectGetWidth", 4, w5)) == 6, "negative width");
 
-    /* the IGP's pattern: an image context, a fill, the image, the end */
+    
     u32 w6[] = {FB(480), FB(1024)};
     imp("_UIGraphicsBeginImageContext", 2, w6);
     u32 ctx = imp("_UIGraphicsGetCurrentContext", 0, NULL);
@@ -327,7 +327,7 @@ static void coregraphics(void)
     imp("_CGContextFillRect", 5, w8);
     imp("_UIGraphicsGetImageFromCurrentImageContext", 0, NULL);
     imp("_UIGraphicsEndImageContext", 0, NULL);
-    /* a bitmap context's image keeps the size; CFRelease works on it */
+    
     u32 sp = imp("_CGColorSpaceCreateDeviceRGB", 0, NULL);
     u32 w9[] = {0, 64, 32, 8, 256, sp, 1};
     u32 bc = imp("_CGBitmapContextCreate", 7, w9);
@@ -338,8 +338,8 @@ static void coregraphics(void)
     imp("_CGColorSpaceRelease", 1, &sp);
 }
 
-/* FAST_DISPATCH (rt_core.c): the bucket table answers as the binary search does, for every function's address,
-   the addresses just after (mid-function, or the next function), the Thumb bit set, and outside __text */
+
+
 typedef struct { u32 addr; void (*fn)(CPU *); } StDispatch;
 extern const StDispatch rt_dispatch[];
 extern const unsigned rt_dispatch_count;
@@ -375,8 +375,8 @@ static void dispatch_checks(void)
           "dispatch table: first and last function");
 }
 
-/* the game code's inline fmax / fmin (arm_rt.h, pass 4) give the C library's answers bit for bit, NaNs and signed
-   zeros included (the library through a pointer, so gcc cannot fold it into its own) */
+
+
 static void fminmax_checks(void)
 {
     static const u64 bits[] = {0, 0x8000000000000000ull, 0x3ff0000000000000ull, 0xbff0000000000000ull,
@@ -394,8 +394,8 @@ static void fminmax_checks(void)
     CHECK(bad == 0, "inline fmax/fmin: %u of %u answers differ from the C library's", bad, 2 * n * n);
 }
 
-/* a player's numeric setting (settings.c): a malformed or missing value is the default, an out-of-range one the
-   nearer end, never NaN or infinite */
+
+
 static void settings_checks(void)
 {
     CHECK(rt_parse_int(" 42 ", 7, 0, 100) == 42 && rt_parse_int(NULL, 7, 0, 100) == 7, "settings: a whole number");
@@ -409,10 +409,10 @@ static void settings_checks(void)
           "settings: NaN and infinities -> the default");
 }
 
-/* MISSING_CARS (missingcars.c): the garage written with its hidden cars back has the save's order */
+
 static void missing_cars_checks(void)
 {
-    /* a garage of 9 whose cars 0, 3, 4 and 8 are hidden; the visible ones keep their order between */
+    
     static const u32 place[] = {0, 3, 4, 8};
     int out[9], ok = 1;
     gt_missing_cars_order(place, 4, 5, out);
@@ -420,7 +420,7 @@ static void missing_cars_checks(void)
     for (int i = 0; i < 9; i++)
         ok &= out[i] == want[i];
     CHECK(ok, "missing cars: the whole garage's order");
-    /* two cars sold since (3 visible left): the last hidden one goes to the end */
+    
     int out2[7];
     gt_missing_cars_order(place, 4, 3, out2);
     static const int want2[7] = {-1, 0, 1, -2, -3, 2, -4};
@@ -430,8 +430,8 @@ static void missing_cars_checks(void)
     CHECK(ok, "missing cars: the order with cars sold");
 }
 
-/* optimisation pass 6: FIXED_FAST, INDEX_FAST and PVRTC_FAST give the plain loops' bytes, LIVE_BLOCKS
-   keeps the right blocks (gles.c, liveblocks.c) */
+
+
 static void pass6_checks(void)
 {
     int n = gles_selftest_fixed();
@@ -444,8 +444,8 @@ static void pass6_checks(void)
     CHECK(gt_live_selftest(why, sizeof why) == 0, "LIVE_BLOCKS: %s", why);
 }
 
-/* CLOUD_BOARD and the leaderboard's names (board.c): SHA-256 / the server's alias, its answer read, the
-   body sent, the URL rule, the merge (our own line never from outside, one line per player) and the rows' names */
+
+
 static void cloud_board_checks(void)
 {
     char why[200] = "";
@@ -453,8 +453,8 @@ static void cloud_board_checks(void)
     CHECK(n == 0, "CLOUD_BOARD: %d check(s) failed, the first: %s", n, why);
 }
 
-/* MAX_STATS cheat code (maxmoney.c): the keyboard word IWANTMAXSTATS, the pad's LB + RB + Up Up Down Down
-   X Y X Y, the resets (a wrong key or button, a bumper let go) and the main menu rule (nothing taken outside it) */
+
+
 static void cheat_checks(void)
 {
     char why[200] = "";
@@ -462,8 +462,8 @@ static void cheat_checks(void)
     CHECK(n == 0, "MAX_STATS cheat: %d check(s) failed, the first: %s", n, why);
 }
 
-/* UTF16_CSTRING (ns_string.c): a plain ASCII string asked for in UTF-16 comes in UTF-16 (the profile's name,
-   F_302bf0: [[UIDevice currentDevice] name] in UTF-16LE), and CFStringGetCStringPtr has no pointer for it */
+
+
 u32 h_CFStringGetCStringPtr(u32 s, u32 enc);
 static void utf16_checks(void)
 {
@@ -482,8 +482,8 @@ static void utf16_checks(void)
     CHECK(h_CFStringGetCStringPtr(s, 0x08000100u) != 0, "CFStringGetCStringPtr gave no UTF-8 pointer");
 }
 
-/* the guest setjmp / longjmp and SjLj exceptions (rt_core.c, imp_unwind.c), through guest-style functions built
-   like the generated code (runtime/rt_selftest.c): paths the menus and a race never take */
+
+
 void rt_selftest_setjmp(CPU *c);
 void rt_selftest_sjlj(CPU *c);
 extern void (*rt_selftest_thrower)(CPU *c);
@@ -497,11 +497,11 @@ void h_objc_exception_throw(CPU *c, u32 exc);
 u32 objc_ehtype_vtable(void);
 
 static u32 jmp_buf_g[64];
-static u32 eh_obj, eh_objc;            /* the object thrown last */
+static u32 eh_obj, eh_objc;
 static u32 fc_outer[16], fc_inner[16];
 
-/* LSDA (SjLj): call site 1 catches std::exception (filter 1), call site 2 is a cleanup, call site 3 catches an
-   Objective-C NSObject (filter 2), else anything (filter 3); landing pads 5, 6, 7 */
+
+
 static u8 lsda[64];
 
 static void lsda_make(void)
@@ -511,15 +511,15 @@ static void lsda_make(void)
     objc_ti[0] = objc_ehtype_vtable();
     objc_ti[1] = GA("NSObject");
     objc_ti[2] = cls("NSObject");
-    /* the types table counts down from its base: filter 3, 2, 1 */
-    u32 types[3] = {0, GA(objc_ti), rd32(ti_re + 8)};   /* catch (...), @catch (NSObject *), std::exception */
-    static const u8 cs[] = {5, 1, 6, 0, 7, 3};           /* (landing pad, action) per call site */
-    static const u8 act[] = {1, 0, 2, 1, 3, 0};          /* (filter, next) records: 1; 2 then 3 */
+
+    u32 types[3] = {0, GA(objc_ti), rd32(ti_re + 8)};
+    static const u8 cs[] = {5, 1, 6, 0, 7, 3};
+    static const u8 act[] = {1, 0, 2, 1, 3, 0};
     u8 *p = lsda;
-    *p++ = 0xff;                       /* no landing pad base */
-    *p++ = 0x00;                       /* types: absolute pointers */
-    u8 *off = p++;                     /* uleb128: from after it to the types' base */
-    *p++ = 0x01;                       /* call sites: uleb128 */
+    *p++ = 0xff;
+    *p++ = 0x00;
+    u8 *off = p++;
+    *p++ = 0x01;
     *p++ = sizeof cs;
     memcpy(p, cs, sizeof cs), p += sizeof cs;
     memcpy(p, act, sizeof act), p += sizeof act;
@@ -541,24 +541,24 @@ static void throw_objc(CPU *c)
     eh_objc = M(M(cls("NSObject"), "alloc", 0), "init", 0);
     h_objc_exception_throw(c, eh_objc);
 }
-static void throw_nested(CPU *c)       /* an inner function with a cleanup (call site 2) around the throw */
+static void throw_nested(CPU *c)
 {
     memset(fc_inner, 0, sizeof fc_inner);
-    fc_inner[7] = GA(lsda);            /* +0x1c */
+    fc_inner[7] = GA(lsda);
     rt_selftest_thrower = throw_cxx;
     c->r[13] -= 64;
     c->r[0] = GA(fc_inner), c->r[1] = 2;
     rt_selftest_sjlj(c);
 }
 
-/* one call of rt_selftest_sjlj on fc_outer at call site cs; out = r0..r2 (landing pad, selector, exception) */
+
 static void sjlj_run(u32 cs, void (*thrower)(CPU *), u32 out[3])
 {
     CPU *c = rt_cpu();
     RtThread *t = c->rt;
     CPU save = *c;
     memset(fc_outer, 0, sizeof fc_outer);
-    fc_outer[7] = GA(lsda);            /* +0x1c */
+    fc_outer[7] = GA(lsda);
     c->r[13] = (c->r[13] - 512) & ~7u;
     c->r[0] = GA(fc_outer), c->r[1] = cs;
     rt_selftest_thrower = thrower;
@@ -574,7 +574,7 @@ static void unwind_checks(void)
 {
     CPU *c = rt_cpu();
     RtThread *t = c->rt;
-    /* setjmp / longjmp: the second return gives val (1 for 0), the registers come back, the frames above go */
+    
     for (int k = 0; k < 2; k++) {
         CPU save = *c;
         RtFrame *top = t->top;
@@ -595,28 +595,28 @@ static void unwind_checks(void)
 
     lsda_make();
     u32 out[3];
-    /* a C++ exception caught by its base class: landing pad 5, selector 1, the object as thrown */
+
     sjlj_run(1, throw_cxx, out);
     CHECK(out[0] == 5 && out[1] == 1, "C++ throw: landing pad %u selector %d (want 5, 1)", out[0], (int)out[1]);
     if (out[2]) {
         CHECK(h_cxa_begin_catch(c, out[2]) == eh_obj, "C++ catch: begin_catch did not give the thrown object");
         h_cxa_end_catch(c);
     }
-    /* an Objective-C exception: @catch (NSObject *) at call site 3, selector 2 */
+
     sjlj_run(3, throw_objc, out);
     CHECK(out[0] == 7 && out[1] == 2, "ObjC throw: landing pad %u selector %d (want 7, 2)", out[0], (int)out[1]);
     if (out[2]) {
         CHECK(h_cxa_begin_catch(c, out[2]) == eh_objc, "ObjC catch: begin_catch did not give the exception");
         h_cxa_end_catch(c);
     }
-    /* a C++ exception at call site 3: the Objective-C filter does not take it, catch (...) does (selector 3) */
+
     sjlj_run(3, throw_cxx, out);
     CHECK(out[0] == 7 && out[1] == 3, "catch (...): landing pad %u selector %d (want 7, 3)", out[0], (int)out[1]);
     if (out[2]) {
         h_cxa_begin_catch(c, out[2]);
         h_cxa_end_catch(c);
     }
-    /* through an inner function's cleanup (_Unwind_SjLj_Resume) to the outer handler */
+
     int before = rt_selftest_cleanups;
     sjlj_run(1, throw_nested, out);
     CHECK(rt_selftest_cleanups == before + 1, "nested throw: the inner cleanup ran %d times",

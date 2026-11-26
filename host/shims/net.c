@@ -1,46 +1,10 @@
-/* net.c -- the network as the game sees it on PC.
-
-   The game's online parts (ads, Gameloft Live, Facebook, Tapjoy, the cross-promotion pages) are not
-   part of this port: names do not resolve, NSURLConnection fails as offline and SCNetworkReachability
-   says "not reachable" for named hosts.  The game then takes the paths it has for an iPad without a
-   connection.  Address conversions (inet_*) are done for real.
-
-   LAN_MULTIPLAYER (default on; GT_LAN_MULTIPLAYER=0 = the all-offline network): the game's Local and
-   Bluetooth multiplayer.  Port fault:
-   stage 4 cut the whole network, so the main menu's Community > Multiplayer > Local said there was no
-   Wi-Fi.  The game's Local mode (NetworkManagerWLAN, 0x2aa5f4..0x2abd0c) is plain BSD UDP: the host
-   binds port 28190, a joining iPad binds 14367, looks for hosts with a broadcast (SO_BROADCAST) and then
-   sends straight to the address recvfrom gave it, polling with select(timeout 0).  So here the sockets
-   are real (Winsock), with the Darwin ABI translated: sockaddr_in's sin_len byte, the errno values,
-   fd_set's bitmap, fcntl(O_NONBLOCK), ioctl(FIONBIO/FIONREAD), SO_* timeouts as timevals.
-     - Socket fds are 900..1019 (Darwin's fd_set holds 1024), apart from the CRT's file descriptors;
-       close() in imp_libc.c hands them here.
-     - Only local addresses can be reached (private, loopback, link-local, 100.64/10 of Tailscale,
-       26/8 of Radmin VPN, the subnets of this PC's adapters, GT_LAN_PEERS): the dead online services
-       stay offline and a connect cannot wait on the internet.
-     - A broadcast is sent as each adapter's subnet broadcast (Windows sends 255.255.255.255 on one
-       adapter only, so a VPN adapter would hide the LAN or the other way round), and to every address
-       in GT_LAN_PEERS=ip[,ip...] as plain unicast (a friend over the internet with the port open).
-     - getifaddrs reports this PC's IPv4 adapters, the one with a gateway first as "en0" (the game's
-       getWiFiIPAddress, 0x2f74f4, wants en0), and reachability for 169.254.0.0 (the game's Wi-Fi test,
-       testWifiConnection 0x2f7624) says "reachable, direct".
-     - Testing two games on one PC: GT_LAN_IP=127.0.0.2 makes that the PC's only address (en0), binds to
-       it instead of 0.0.0.0 (an unbound socket is bound to it before its first send) and a broadcast
-       goes to GT_LAN_PEERS only, so two runs with 127.0.0.2 / 127.0.0.3 see each other like two iPads.
-   gk.c (GameKit's GKSession, the Bluetooth mode) is built on the same sockets.
-
-   NO_TCP_WAIT (port fault).  With TCP sockets the start-up to the main menu takes 13.1 s instead of 3.1 s:
-   GLAppleMain (Gameloft's GLXPlayer client, http://gllive.gameloft.com/ope/GenericXPlayer_v1.php)
-   gets its TCP socket, so instead of failing at once it asks SockUtility::GetHostByName (0x443574,
-   an async gethostbyname thread 0x443410 retried every 2000 ms, "pending" and "not found" look the same)
-   and the main thread waits ~10 s (1 frame a second) until GLAppleInfoObserver::OnNetworkError.  Every
-   TCP user in the game is an internet service (GLXPlayer, GL Live, SSL, curl), none can resolve here, and
-   the multiplayer modes are UDP only (no TCP connect in any LAN / Online test), so socket(SOCK_STREAM)
-   fails with ENETUNREACH, as with no network at all.  GT_LAN_TCP=1 gives TCP sockets back
-   (testing). */
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#else
+#include "compat_net.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,11 +23,9 @@ static u32 fail_with(int e)
 }
 static u32 fail(void) { return fail_with(D_ENETUNREACH); }
 
-/* settings, Winsock */
-
 static int lan_state = -1;
-static int nlog;                         /* GT_NET_LOG=1: each socket call (testing) */
-static u32 test_ip;                       /* GT_LAN_IP, network order (0 = the real adapters) */
+static int nlog;
+static u32 test_ip;
 static u32 peers[16];
 static int n_peers;
 
@@ -114,8 +76,6 @@ int net_lan_on(void)
 }
 u32 net_test_ip(void) { return net_lan_on() ? test_ip : 0; }
 
-/* this PC's IPv4 adapters (refreshed every few seconds) */
-
 typedef struct { u32 addr, mask; int gateway; char name[8]; } Adapter;
 static Adapter adapters[16];
 static int n_adapters;
@@ -133,6 +93,7 @@ static void adapters_refresh(void)
         got[0] = (Adapter){test_ip, htonl(0xff000000u), 1, "en0"};
         n = 1;
     } else {
+#ifdef _WIN32
         ULONG len = 16 * 1024;
         IP_ADAPTER_ADDRESSES *aa = malloc(len);
         if (aa && GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_DNS_SERVER |
@@ -147,7 +108,7 @@ static void adapters_refresh(void)
                 aa = NULL;
             }
         }
-        for (int pass = 0; pass < 2 && aa; pass++)          /* adapters with a gateway first */
+        for (int pass = 0; pass < 2 && aa; pass++)
             for (IP_ADAPTER_ADDRESSES *a = aa; a; a = a->Next) {
                 if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
                     continue;
@@ -162,11 +123,43 @@ static void adapters_refresh(void)
                     ConvertLengthToIpv4Mask(u->OnLinkPrefixLength, &m);
                     d->mask = m;
                     d->gateway = pass == 0;
-                    snprintf(d->name, sizeof d->name, "en%d", n & 15);   /* n < 16 */
+                    snprintf(d->name, sizeof d->name, "en%d", n & 15);
                     n++;
                 }
             }
         free(aa);
+#else
+        struct ifaddrs *ia = NULL;
+        FILE *rf = fopen("/proc/net/route", "r");
+        char line[256], dev[IFNAMSIZ], gw_dev[16][IFNAMSIZ];
+        int ngw = 0;
+        unsigned long dst, gw, flags;
+        while (rf && fgets(line, sizeof line, rf) && ngw < 16)
+            if (sscanf(line, "%15s %lx %lx %lx", dev, &dst, &gw, &flags) == 4 && !dst && (flags & 3) == 3)
+                snprintf(gw_dev[ngw++], IFNAMSIZ, "%s", dev);
+        if (rf)
+            fclose(rf);
+        if (!getifaddrs(&ia))
+            for (int pass = 0; pass < 2; pass++)
+                for (struct ifaddrs *a = ia; a && n < 16; a = a->ifa_next) {
+                    if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET || !a->ifa_netmask ||
+                        !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK))
+                        continue;
+                    int has_gw = 0;
+                    for (int g = 0; g < ngw; g++)
+                        has_gw |= !strcmp(gw_dev[g], a->ifa_name);
+                    if (has_gw != (pass == 0))
+                        continue;
+                    Adapter *d = &got[n];
+                    d->addr = ((struct sockaddr_in *)a->ifa_addr)->sin_addr.s_addr;
+                    d->mask = ((struct sockaddr_in *)a->ifa_netmask)->sin_addr.s_addr;
+                    d->gateway = pass == 0;
+                    snprintf(d->name, sizeof d->name, "en%d", n & 15);
+                    n++;
+                }
+        if (ia)
+            freeifaddrs(ia);
+#endif
     }
     AcquireSRWLockExclusive(&adapters_lock);
     memcpy(adapters, got, sizeof got);
@@ -195,7 +188,6 @@ static int is_broadcast(u32 a)
     return 0;
 }
 
-/* RED_BULL_BOARD (board.c): one of this PC's own addresses (the test address, loopback without one, an adapter) */
 int net_own_addr(u32 a)
 {
     if (test_ip)
@@ -210,7 +202,6 @@ int net_own_addr(u32 a)
     return 0;
 }
 
-/* addresses a socket may reach: see the top of the file */
 int net_addr_allowed(u32 a)
 {
     u32 h = ntohl(a);
@@ -228,16 +219,14 @@ int net_addr_allowed(u32 a)
     return 0;
 }
 
-/* the socket table */
-
 #define SOCK_BASE 900
 #define SOCK_MAX 120
 typedef struct Dgram { struct Dgram *next; u32 from_ip; u16 from_port; u32 n; u8 data[]; } Dgram;
 typedef struct {
     SOCKET s;
     int used, nonblock, type, bound;
-    u16 lport;                            /* host order, once bound */
-    Dgram *q, *qt;                        /* ONLINE_P2P: datagrams from the tunnel */
+    u16 lport;
+    Dgram *q, *qt;
     int qn;
 } Sock;
 static Sock socks[SOCK_MAX];
@@ -250,8 +239,6 @@ static Sock *sk(u32 fd)
     return &socks[fd - SOCK_BASE];
 }
 int net_is_socket(u32 fd) { return sk(fd) != NULL; }
-/* BACKGROUND_THROTTLE (uikit.c): the game has a socket open (Local over LAN, Online) or the ONLINE_P2P tunnel is
-   up: the window keeps its full frame rate */
 static volatile int tun_on;
 int net_sockets_open(void)
 {
@@ -266,7 +253,7 @@ int net_sockets_open(void)
 static u32 werr_map(int e)
 {
     switch (e) {
-    case WSAEWOULDBLOCK: return 35;     /* EAGAIN */
+    case WSAEWOULDBLOCK: return 35;
     case WSAEINPROGRESS: return 36;
     case WSAEALREADY: return 37;
     case WSAENOTSOCK: return 38;
@@ -293,12 +280,11 @@ static u32 werr_map(int e)
     case WSAEACCES: return 13;
     case WSAEFAULT: return 14;
     case WSAEMFILE: return 24;
-    default: return 22;                 /* EINVAL */
+    default: return 22;
     }
 }
 static u32 werr(void) { return fail_with((int)werr_map(WSAGetLastError())); }
 
-/* Darwin's sockaddr_in: u8 sin_len, u8 sin_family, port, address -- Windows: u16 family, port, address */
 static int sa_in(u32 ga, u32 len, struct sockaddr_in *w)
 {
     const u8 *b = GP(ga);
@@ -332,7 +318,6 @@ static void sock_note_port(Sock *s)
 }
 static void sock_bind_any(Sock *s)
 {
-    /* an unbound socket gets its port now (the tunnel names it; GT_LAN_IP: sends from the test address) */
     if (s->bound)
         return;
     struct sockaddr_in w = {0};
@@ -349,15 +334,7 @@ static void sock_bind_test(Sock *s)
         sock_bind_any(s);
 }
 
-/* ONLINE_P2P: the game's UDP to players on the internet, through one UDP port
-   p2p.c starts it (the Online tile, hosting or joining with a room code).  Each player on the far side is a virtual
-   address 10.254.254.<n> to the game; what the game sends there (and its broadcasts) goes to that player's
-   address:port in one datagram ("GTP2", kind, the room code's key, source port, destination port, payload; one with another key is dropped), and what comes in is
-   queued on the game's socket bound to the destination port, from <virtual address>:<source port>.  Every
-   second each player gets a hello, which keeps both routers' mappings open; a player who sends first (the one
-   joining with the code) is learnt from its packets, so only the host's port has to be open. */
-
-#define VIP_BASE 0x0afefe00u               /* 10.254.254.0, host order */
+#define VIP_BASE 0x0afefe00u
 #define TPEERS 8
 typedef struct { u32 ip; u16 port; int used, fixed; DWORD last_rx, last_tx; } TPeer;
 static TPeer tpeers[TPEERS];
@@ -384,7 +361,6 @@ static int vip_index(u32 a_be)
 }
 static u32 vip_of(int i) { return htonl(VIP_BASE + (u32)i + 1); }
 
-/* "GTP2", kind (1 hello, 2 data), the room code's key (3 bytes), source port, destination port, payload */
 #define TUN_HDR 12
 static u32 tun_key;
 
@@ -453,7 +429,6 @@ static void sock_queue(u16 dport, u32 from_ip, u16 from_port, const u8 *p, u32 n
     ReleaseSRWLockExclusive(&socks_lock);
 }
 
-/* RED_BULL_BOARD (board.c): a leaderboard to that player, through the tunnel (kind 3) */
 void net_p2p_board(int i, const void *p, u32 n)
 {
     if (!tun_on || i < 0 || i >= TPEERS)
@@ -466,7 +441,7 @@ void net_p2p_board(int i, const void *p, u32 n)
 
 static void tun_poll(void)
 {
-    board_poll();                         /* RED_BULL_BOARD: the leaderboards to and from the other players */
+    board_poll();
     if (!tun_on)
         return;
     p2p_poll();
@@ -490,7 +465,7 @@ static void tun_poll(void)
         }
         int i = tpeer_find(w.sin_addr.s_addr, w.sin_port);
         if (i < 0)
-            i = tpeer_add(w.sin_addr.s_addr, w.sin_port, 0);     /* a player joining with our code */
+            i = tpeer_add(w.sin_addr.s_addr, w.sin_port, 0);
         if (i < 0)
             continue;
         tpeers[i].last_rx = GetTickCount();
@@ -499,7 +474,7 @@ static void tun_poll(void)
                        (u32)n - TUN_HDR);
             board_peer_tun(i);
         } else if (b[4] == 3) {
-            board_rx_tun(i, b + TUN_HDR, (u32)n - TUN_HDR);    /* RED_BULL_BOARD: that player's leaderboard */
+            board_rx_tun(i, b + TUN_HDR, (u32)n - TUN_HDR);
         }
     }
     DWORD now = GetTickCount();
@@ -512,12 +487,11 @@ static void tun_poll(void)
             continue;
         }
         if (now - tpeers[i].last_tx >= 1000)
-            tun_raw(i, 1, 0, 0, NULL, 0);                         /* hello: keeps the routers' mappings */
+            tun_raw(i, 1, 0, 0, NULL, 0);
     }
     LeaveCriticalSection(&tun_lock);
 }
 
-/* p2p.c: open the tunnel on that port (0 = any); returns the port, 0 on failure */
 u16 net_p2p_open(u16 port)
 {
     if (!net_lan_on())
@@ -537,7 +511,7 @@ u16 net_p2p_open(u16 port)
     w.sin_addr.s_addr = test_ip;
     w.sin_port = htons(port);
     if (bind(tun, (struct sockaddr *)&w, sizeof w)) {
-        w.sin_port = 0;                                           /* taken: any port */
+        w.sin_port = 0;
         bind(tun, (struct sockaddr *)&w, sizeof w);
     }
     BOOL no = FALSE;
@@ -576,7 +550,6 @@ void net_p2p_add_peer(u32 ip_be, u16 port_be)
     LeaveCriticalSection(&tun_lock);
 }
 
-/* the game sends to a virtual address, or broadcasts: through the tunnel */
 static int tun_send(Sock *s, u32 dst, u16 dport_be, const void *p, u32 n, int broadcast)
 {
     if (!tun_on || s->type != 2)
@@ -625,10 +598,9 @@ static u32 net_socket_new(int type)
     if (h == INVALID_SOCKET)
         return werr();
     if (type != 1) {
-        /* Windows reports an ICMP "port unreachable" as WSAECONNRESET on the next recvfrom; BSD does not */
         BOOL no = FALSE;
         DWORD got;
-        WSAIoctl(h, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &no, sizeof no, NULL, 0, &got, NULL, NULL);
+        WSAIoctl(h, _WSAIOW(IOC_VENDOR, 12), &no, sizeof no, NULL, 0, &got, NULL, NULL);
     }
     AcquireSRWLockExclusive(&socks_lock);
     for (int i = 0; i < SOCK_MAX; i++)
@@ -648,10 +620,9 @@ u32 h_socket(u32 dom, u32 type, u32 proto)
     if (!net_lan_on())
         return fail();
     if (dom != 2)
-        return fail_with(47);                /* EAFNOSUPPORT: IPv4 only */
+        return fail_with(47);
     if (type != 1 && type != 2)
         return fail_with(43);
-    /* NO_TCP_WAIT: TCP stays offline (see the header) */
     if (type == 1 && !getenv("GT_LAN_TCP"))
         return fail();
     u32 fd = net_socket_new((int)type);
@@ -747,7 +718,7 @@ u32 h_connect(u32 fd, u32 a, u32 n)
     sock_bind_test(s);
     if (connect(s->s, (struct sockaddr *)&w, sizeof w)) {
         int e = WSAGetLastError();
-        return fail_with(e == WSAEWOULDBLOCK ? 36 : (int)werr_map(e));      /* EINPROGRESS */
+        return fail_with(e == WSAEWOULDBLOCK ? 36 : (int)werr_map(e));
     }
     return 0;
 }
@@ -766,11 +737,10 @@ u32 h_recv(u32 fd, u32 p, u32 n, u32 f)
         return fail_with(9);
     int r = recv(s->s, GP(p), (int)n, (int)(f & 3));
     if (r < 0 && WSAGetLastError() == WSAEMSGSIZE)
-        return n;                            /* BSD: the datagram is cut, no error */
+        return n;
     return r < 0 ? werr() : (u32)r;
 }
 
-/* a broadcast: every adapter's subnet broadcast (or nothing with GT_LAN_IP), then GT_LAN_PEERS */
 int net_broadcast(SOCKET h, const void *p, int n, u16 port_be)
 {
     struct sockaddr_in w = {0};
@@ -819,10 +789,10 @@ u32 h_sendto(u32 fd, u32 p, u32 n, u32 f, u32 a, u32 al)
     }
     tun_poll();
     if (s->type == 2 && is_broadcast(w.sin_addr.s_addr)) {
-        int t = tun_send(s, 0, w.sin_port, GP(p), n, 1);  /* ONLINE_P2P: the internet players too */
+        int t = tun_send(s, 0, w.sin_port, GP(p), n, 1);
         int r = net_broadcast(s->s, GP(p), (int)n, w.sin_port);
         if (r < 0 && (t || (!n_peers && test_ip)))
-            return n;                        /* nobody to tell: as if it went out */
+            return n;
         return r < 0 ? werr() : n;
     }
     if (vip_index(w.sin_addr.s_addr) >= 0)
@@ -830,7 +800,7 @@ u32 h_sendto(u32 fd, u32 p, u32 n, u32 f, u32 a, u32 al)
     if (!net_addr_allowed(w.sin_addr.s_addr))
         return fail();
     if (s->type == 2 && !net_own_addr(w.sin_addr.s_addr))
-        board_peer_lan(w.sin_addr.s_addr);   /* RED_BULL_BOARD: a player the game talks to (Local) */
+        board_peer_lan(w.sin_addr.s_addr);
     int r = sendto(s->s, GP(p), (int)n, (int)(f & 1), (struct sockaddr *)&w, sizeof w);
     if (r < 0 && GT_DEV && nlog)
         rt_log("[net] sendto failed: WSA %d\n", WSAGetLastError());
@@ -843,7 +813,7 @@ u32 h_recvfrom(u32 fd, u32 p, u32 n, u32 f, u32 a, u32 al)
         return fail_with(9);
     tun_poll();
     if (s->q) {
-        int q = sock_pop(s, p, n, a, al);    /* ONLINE_P2P: from the tunnel first */
+        int q = sock_pop(s, p, n, a, al);
         if (q >= 0)
             return (u32)q;
     }
@@ -863,7 +833,6 @@ u32 h_recvfrom(u32 fd, u32 p, u32 n, u32 f, u32 a, u32 al)
     return (u32)r;
 }
 
-/* Darwin's fd_set: 1024 bits in u32 words; struct timeval: long seconds, int microseconds */
 u32 h_select(u32 nfds, u32 r, u32 wr, u32 e, u32 t)
 {
     u32 *sets[3] = {r ? GP(r) : NULL, wr ? GP(wr) : NULL, e ? GP(e) : NULL};
@@ -892,7 +861,6 @@ u32 h_select(u32 nfds, u32 r, u32 wr, u32 e, u32 t)
         tv.tv_usec = (long)rd32(t + 4);
         tp = &tv;
     }
-    /* ONLINE_P2P: a socket with tunnel datagrams waiting is readable now */
     tun_poll();
     int queued = 0;
     for (int i = 0; i < nf[0]; i++) {
@@ -935,6 +903,30 @@ u32 h_select(u32 nfds, u32 r, u32 wr, u32 e, u32 t)
     return (u32)got;
 }
 
+#ifndef _WIN32
+static int sol_opt(u32 opt)
+{
+    switch (opt) {
+    case 0x0004: return SO_REUSEADDR;
+    case 0x0008: return SO_KEEPALIVE;
+    case 0x0010: return SO_DONTROUTE;
+    case 0x0020: return SO_BROADCAST;
+    case 0x0080: return SO_LINGER;
+    case 0x0100: return SO_OOBINLINE;
+    case 0x1001: return SO_SNDBUF;
+    case 0x1002: return SO_RCVBUF;
+    case 0x1003: return SO_SNDLOWAT;
+    case 0x1004: return SO_RCVLOWAT;
+    case 0x1005: return SO_SNDTIMEO;
+    case 0x1006: return SO_RCVTIMEO;
+    case 0x1007: return SO_ERROR;
+    case 0x1008: return SO_TYPE;
+    default: return -1;
+    }
+}
+static int ip_level(u32 level) { return level == 0xffff ? SOL_SOCKET : (int)level; }
+#endif
+
 u32 h_setsockopt(u32 fd, u32 level, u32 opt, u32 v, u32 n)
 {
     Sock *s = sk(fd);
@@ -944,26 +936,40 @@ u32 h_setsockopt(u32 fd, u32 level, u32 opt, u32 v, u32 n)
     int r;
     if (level == 0xffff) {
         switch (opt) {
-        case 0x1022:                         /* SO_NOSIGPIPE: Windows has no SIGPIPE */
+        case 0x1022:
             return 0;
-        case 0x200:                          /* SO_REUSEPORT */
+        case 0x200:
+#ifdef _WIN32
             opt = SO_REUSEADDR;
+#else
+            opt = 0x0004;
+#endif
             break;
-        case 0x80: {                         /* SO_LINGER: two ints on Darwin, two shorts here */
+        case 0x80: {
             struct linger l = {(u_short)rd32(v), (u_short)rd32(v + 4)};
             r = setsockopt(s->s, SOL_SOCKET, SO_LINGER, (const char *)&l, sizeof l);
             return r ? werr() : 0;
         }
-        case 0x1005:                         /* SO_SNDTIMEO, SO_RCVTIMEO: a timeval there, ms here */
+        case 0x1005:
         case 0x1006: {
             DWORD ms = rd32(v) * 1000 + rd32(v + 4) / 1000;
+#ifdef _WIN32
             r = setsockopt(s->s, SOL_SOCKET, (int)opt, (const char *)&ms, sizeof ms);
+#else
+            r = setsockopt(s->s, SOL_SOCKET, sol_opt(opt), (const char *)&ms, sizeof ms);
+#endif
             return r ? werr() : 0;
         }
         }
+#ifdef _WIN32
         r = setsockopt(s->s, SOL_SOCKET, (int)opt, (const char *)&iv, sizeof iv);
+#else
+        if (sol_opt(opt) < 0)
+            return 0;
+        r = setsockopt(s->s, SOL_SOCKET, sol_opt(opt), (const char *)&iv, sizeof iv);
+#endif
     } else {
-        r = setsockopt(s->s, (int)level, (int)opt, GP(v), (int)n);    /* IP_*, TCP_NODELAY: same numbers */
+        r = setsockopt(s->s, (int)level, (int)opt, GP(v), (int)n);
     }
     if (GT_DEV && GT_DEV && nlog)
         rt_log("[net] setsockopt(%u, 0x%x, 0x%x, %d) = %d\n", fd, level, opt, iv, r ? WSAGetLastError() : 0);
@@ -975,9 +981,15 @@ u32 h_getsockopt(u32 fd, u32 level, u32 opt, u32 v, u32 n)
     if (!s)
         return fail_with(9);
     int iv = 0, il = sizeof iv;
+#ifdef _WIN32
     if (getsockopt(s->s, level == 0xffff ? SOL_SOCKET : (int)level, (int)opt, (char *)&iv, &il))
         return werr();
-    if (level == 0xffff && opt == 0x1007 && iv)       /* SO_ERROR */
+#else
+    int lo = level == 0xffff ? sol_opt(opt) : (int)opt;
+    if (lo < 0 || getsockopt(s->s, ip_level(level), lo, (char *)&iv, &il))
+        return werr();
+#endif
+    if (level == 0xffff && opt == 0x1007 && iv)
         iv = (int)werr_map(iv);
     if (v)
         wr32(v, (u32)iv);
@@ -1017,15 +1029,14 @@ u32 h_getsockname(u32 fd, u32 a, u32 n)
     return 0;
 }
 
-/* fcntl / ioctl on a socket (imp_libc.c hands them over) */
 u32 net_fcntl(u32 fd, u32 cmd, u32 arg)
 {
     Sock *s = sk(fd);
     if (!s)
         return fail_with(9);
-    if (cmd == 3)                            /* F_GETFL */
-        return 2u | (s->nonblock ? 4u : 0u);  /* O_RDWR | O_NONBLOCK */
-    if (cmd == 4) {                          /* F_SETFL */
+    if (cmd == 3)
+        return 2u | (s->nonblock ? 4u : 0u);
+    if (cmd == 4) {
         u_long nb = (arg & 4) != 0;
         if (ioctlsocket(s->s, FIONBIO, &nb))
             return werr();
@@ -1038,14 +1049,14 @@ u32 net_ioctl(u32 fd, u32 req, u32 argp)
     Sock *s = sk(fd);
     if (!s)
         return fail_with(9);
-    if (req == 0x8004667eu) {                /* FIONBIO */
+    if (req == 0x8004667eu) {
         u_long nb = argp && rd32(argp);
         if (ioctlsocket(s->s, FIONBIO, &nb))
             return werr();
         s->nonblock = (int)nb;
         return 0;
     }
-    if (req == 0x4004667fu) {                /* FIONREAD */
+    if (req == 0x4004667fu) {
         u_long avail = 0;
         if (ioctlsocket(s->s, FIONREAD, &avail))
             return werr();
@@ -1053,7 +1064,7 @@ u32 net_ioctl(u32 fd, u32 req, u32 argp)
             wr32(argp, (u32)avail);
         return 0;
     }
-    return fail_with(25);                    /* ENOTTY */
+    return fail_with(25);
 }
 
 u32 h_getaddrinfo(u32 node, u32 serv, u32 hints, u32 res)
@@ -1068,8 +1079,6 @@ u32 h_getaddrinfo(u32 node, u32 serv, u32 hints, u32 res)
 void h_freeaddrinfo(u32 ai) { (void)ai; }
 u32 h_gethostbyname(u32 name) { (void)name; return 0; }
 
-/* Darwin's struct ifaddrs (32-bit): next, name, flags, addr, netmask, broadaddr, data -- one block
-   holding the list, its addresses and names, so freeifaddrs frees the first entry */
 u32 h_getifaddrs(u32 out)
 {
     if (!out)
@@ -1097,7 +1106,7 @@ u32 h_getifaddrs(u32 out)
         snprintf((char *)nm, NAME, "%s", ad[i].name);
         wr32(GA(e) + 0, i + 1 < n ? GA(blk + (i + 1) * ONE) : 0);
         wr32(GA(e) + 4, GA(nm));
-        wr32(GA(e) + 8, 0x1u | 0x2u | 0x40u | 0x8000u);   /* UP, BROADCAST, RUNNING, MULTICAST */
+        wr32(GA(e) + 8, 0x1u | 0x2u | 0x40u | 0x8000u);
         wr32(GA(e) + 12, GA(addr));
         wr32(GA(e) + 16, GA(mask));
         wr32(GA(e) + 20, GA(brd));
@@ -1116,8 +1125,6 @@ void h_freeifaddrs(u32 p)
     if (p && net_lan_on())
         free(GP(p));
 }
-/* en0 exists (index 1), with a fixed, locally administered MAC address: the game's ID code reads it
-   through sysctl(NET_RT_IFLIST) and never expects that to fail (uikit.c's sysctl calls net_iflist) */
 u32 h_if_nametoindex(u32 name) { return !strcmp(GP(name), "en0") ? 1 : 0; }
 
 u32 net_iflist(u32 index, u32 oldp, u32 oldlenp)
@@ -1125,17 +1132,17 @@ u32 net_iflist(u32 index, u32 oldp, u32 oldlenp)
     static const u8 mac[6] = {0x02, 0x00, 0x47, 0x54, 0x52, 0x31};
     u8 msg[0x70 + 20];
     memset(msg, 0, sizeof msg);
-    msg[0] = sizeof msg;                 /* if_msghdr: ifm_msglen, version, type RTM_IFINFO, ... */
+    msg[0] = sizeof msg;
     msg[2] = 5;
     msg[3] = 0xe;
     msg[12] = (u8)index;
-    u8 *dl = msg + 0x70;                 /* sockaddr_dl */
-    dl[0] = 20;                          /* sdl_len */
-    dl[1] = 18;                          /* AF_LINK */
+    u8 *dl = msg + 0x70;
+    dl[0] = 20;
+    dl[1] = 18;
     dl[2] = (u8)index;
-    dl[4] = 6;                           /* IFT_ETHER */
-    dl[5] = 3;                           /* sdl_nlen */
-    dl[6] = 6;                           /* sdl_alen */
+    dl[4] = 6;
+    dl[5] = 3;
+    dl[6] = 6;
     memcpy(dl + 8, "en0", 3);
     memcpy(dl + 11, mac, 6);
     u32 room = oldlenp ? rd32(oldlenp) : 0;
@@ -1148,8 +1155,6 @@ u32 net_iflist(u32 index, u32 oldp, u32 oldlenp)
     memcpy(GP(oldp), msg, sizeof msg);
     return 0;
 }
-
-/* addresses (network byte order in the u32, as the game keeps them) */
 
 static int parse4(const char *s, u8 out[4])
 {
@@ -1195,10 +1200,10 @@ u32 h_inet_ntoa(u32 a)
 u32 h_inet_ntop(u32 af, u32 src, u32 dst, u32 size)
 {
     char tmp[64];
-    if (af == 2) {                 /* AF_INET */
+    if (af == 2) {
         const u8 *b = GP(src);
         snprintf(tmp, sizeof tmp, "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
-    } else if (af == 30) {         /* AF_INET6 on Darwin */
+    } else if (af == 30) {
         const u8 *b = GP(src);
         int n = 0;
         for (int i = 0; i < 16; i += 2)
@@ -1221,11 +1226,6 @@ u32 h_inet_pton(u32 af, u32 s, u32 dst)
     memcpy(GP(dst), b, 4);
     return 1;
 }
-
-/* NSURLRequest, NSURLConnection: every connection fails as offline
-   Asynchronously, like iOS without a network: the delegate gets connection:didFailWithError: with
-   NSURLErrorNotConnectedToInternet on the run loop of the thread that started it.  SDKs that keep
-   a thread per request (Burstly) stop it on that callback. */
 
 #define SELF c->r[0]
 #define ARG(i) arg_word(c, 2 + (i))
@@ -1309,7 +1309,6 @@ static void cn_start_now(id conn)
 }
 static void cn_initWith(CPU *c)
 {
-    /* initWithRequest:delegate:[startImmediately:] */
     id self = SELF;
     CN(self)->request = objc_retain(ARG(0));
     CN(self)->delegate = objc_retain(ARG(1));
@@ -1325,7 +1324,6 @@ static void cn_initWith(CPU *c)
 }
 static void cn_with(CPU *c)
 {
-    /* +connectionWithRequest:delegate: */
     id o = ns_alloc(SELF, sizeof(Conn));
     u32 w[2] = {ARG(0), ARG(1)};
     objc_msg(o, "initWithRequest:delegate:", 2, w);
@@ -1346,7 +1344,6 @@ static void cn_fail(CPU *c)
 }
 static void cn_sync(CPU *c)
 {
-    /* +sendSynchronousRequest:returningResponse:error: */
     if (ARG(1))
         wr32(ARG(1), 0);
     if (ARG(2))
@@ -1355,7 +1352,6 @@ static void cn_sync(CPU *c)
 }
 static void cn_async(CPU *c)
 {
-    /* +sendAsynchronousRequest:queue:completionHandler: -- the handler(response, data, error) later */
     u32 b = gt_block_copy(ARG(2));
     if (b)
         rt_call4(rd32(b + 12), b, 0, 0, offline_error());
@@ -1409,8 +1405,6 @@ void gt_net_init(void)
     ns_methods("NSHTTPCookieStorage", jar);
 }
 
-/* SCNetworkReachability: named hosts never reachable; the local Wi-Fi with LAN_MULTIPLAYER */
-
 u32 h_SCNetworkReachabilityCreateWithName(u32 alloc, u32 name)
 {
     (void)alloc, (void)name;
@@ -1420,20 +1414,16 @@ u32 h_SCNetworkReachabilityCreateWithAddress(u32 alloc, u32 addr)
 {
     (void)alloc;
     id r = objc_retain(ns_alloc(ns_class("SCNetworkReachability"), 8));
-    /* 169.254.0.0: Apple's "reachability for local Wi-Fi", the game's testWifiConnection (0x2f7624) */
     const u8 *b = addr ? GP(addr) : NULL;
     if (b && b[1] == 2 && b[4] == 169 && b[5] == 254 && net_lan_on()) {
         Adapter ad[16];
         if (adapters_copy(ad))
-            wr32(r + 4, 0x20002u);           /* kSCNetworkReachabilityFlagsReachable | IsDirect */
+            wr32(r + 4, 0x20002u);
     }
-    /* 0.0.0.0 from the multiplayer menus' IsNetworkReachable (F_3075d8, called by ServerTypeMenu and the
-       network managers only; Host server said "No network found" without it).  The same question from
-       anywhere else (ads, Gameloft Live, ServerBasedFacade) still gets "not reachable". */
     if (b && b[1] == 2 && !b[4] && !b[5] && !b[6] && !b[7] && rt_cpu()->r[14] == 0x307618u && net_lan_on()) {
         Adapter ad[16];
         if (adapters_copy(ad))
-            wr32(r + 4, 0x2u);               /* Reachable (not WWAN) */
+            wr32(r + 4, 0x2u);
     }
     return r;
 }

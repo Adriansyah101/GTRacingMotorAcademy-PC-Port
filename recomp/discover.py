@@ -1,14 +1,3 @@
-"""Stage 1: find every function's blocks, calls, jump tables and literal data.
-
-Usage: python -I discover.py <executable> <out_dir>
-
-Each function comes from LC_FUNCTION_STARTS; ld64 stores the Thumb bit in bit 0,
-which matched all 2,655 Thumb/ARM symbols, so the mode is taken from there.
-Inside a function the code is walked by recursive descent (branches, IT
-blocks, jump tables), PC-relative loads mark literal data, and whatever bytes
-are left are classified (padding, or reported as unreached).
-Writes functions.json (for the code generator) and stage1_report.txt.
-"""
 import json
 import os
 import sys
@@ -24,14 +13,12 @@ from macho import MachO  # noqa: E402
 CC_AL = A.ARM_CC_AL
 PC, LR, SP = A.ARM_REG_PC, A.ARM_REG_LR, A.ARM_REG_SP
 
-# Size of the data read by PC-relative loads, by instruction id.
 LOAD_SIZE = {
     A.ARM_INS_LDR: 4, A.ARM_INS_LDRB: 1, A.ARM_INS_LDRSB: 1, A.ARM_INS_LDRH: 2,
     A.ARM_INS_LDRSH: 2, A.ARM_INS_LDRD: 8, A.ARM_INS_PLD: 0, A.ARM_INS_PLI: 0,
 }
-ARM_NOPS = {b'\x00\x00\xa0\xe1', b'\x00\xf0\x20\xe3'}      # mov r0,r0 ; nop
-THUMB_NOPS = {b'\x00\xbf', b'\xc0\x46'}                      # nop ; mov r8,r8
-# Calls after which execution does not come back (checked against callee names).
+ARM_NOPS = {b'\x00\x00\xa0\xe1', b'\x00\xf0\x20\xe3'}
+THUMB_NOPS = {b'\x00\xbf', b'\xc0\x46'}
 NORETURN_HINT = ('abort', 'exit', '_exit', '__cxa_throw', '__cxa_rethrow',
                  '_Unwind_SjLj_Resume', '__stack_chk_fail', '__assert_rtn',
                  'longjmp', 'siglongjmp', 'objc_exception_throw', '__cxa_call_unexpected',
@@ -59,28 +46,26 @@ class Func:
                  'flags', 'refs', 'cand', 'after_uncond', 'datarefs', 'walked', 'preds', 'ctl')
 
     def __init__(self, start, end, thumb):
-        self.cand = {}           # internal address constants -> bit 0, not yet judged
-        self.after_uncond = {}   # address after an unconditional branch -> its target
-        self.datarefs = set()    # internal address constants judged to be data
+        self.cand = {}
+        self.after_uncond = {}
+        self.datarefs = set()
         self.walked = False
-        self.preds = {}          # internal branch target -> branch sites
+        self.preds = {}
         self.start, self.end, self.thumb = start, end, thumb
-        self.insns = {}          # addr -> size
-        self.blocks = set()      # block start addresses (branch targets + entry)
-        self.calls = []          # (site, target, target_thumb)
-        self.imports = []        # (site, name)
-        self.icalls = []         # sites of calls through a register
-        self.ijumps = []         # (site, text) unresolved indirect jumps
+        self.insns = {}
+        self.blocks = set()
+        self.calls = []
+        self.imports = []
+        self.icalls = []
+        self.ijumps = []
         self.rets = 0
-        self.tables = []         # dict(site, kind, base, size, targets)
-        self.literals = {}       # addr -> size
-        self.taken = set()       # internal labels whose address is taken
-        self.tails = []          # (site, target, conditional)
-        self.flags = []          # problems found
-        self.refs = []           # (site, value) code addresses built by code
-        self.ctl = {}            # site -> (kind, target) for writes to PC that are not
-        #                          plain b/bl/cbz: 'ret', 'br' (internal), 'tail', 'table'
-
+        self.tables = []
+        self.literals = {}
+        self.taken = set()
+        self.tails = []
+        self.flags = []
+        self.refs = []
+        self.ctl = {}
 
 class Discover:
     def __init__(self, path):
@@ -101,9 +86,8 @@ class Discover:
         self.func_at = {}
 
     def run(self):
-        """Walk all functions; add starts the table misses and walk again."""
         self.data_words = self.collect_data_words()
-        self.added = {}            # addr -> (thumb, reason)
+        self.added = {}
         self.rounds = []
         starts = dict(self.starts)
         self.noreturn = set()
@@ -124,8 +108,6 @@ class Discover:
         self.scan_data_pointers()
 
     def update_noreturn(self):
-        """Functions with no return, tail jump or indirect jump never come back;
-        their callers are walked again with the call ending the block."""
         while True:
             nr = {f.start for f in self.funcs
                   if f.insns and f.rets == 0 and not f.tails and not f.ijumps}
@@ -141,7 +123,6 @@ class Discover:
                     self.walk(g)
 
     def build(self, starts):
-        """Make the function list; functions whose range did not change keep their walk."""
         old = {(f.start, f.end, f.thumb): f for f in self.funcs}
         self.funcs, self.func_at = [], {}
         order = sorted(starts.items())
@@ -159,7 +140,6 @@ class Discover:
         return self.funcs[i] if i >= 0 else None
 
     def collect_data_words(self):
-        """(section, addr, value) for data words whose value lies in __text."""
         m = self.m
         out = []
         for s in m.sections:
@@ -175,7 +155,6 @@ class Discover:
         return out
 
     def gap_starts(self):
-        """First non-padding address of every unreached gap -> containing function."""
         out = {}
         self.gap_ranges = []
         for f in self.funcs:
@@ -221,7 +200,6 @@ class Discover:
     def find_new_starts(self):
         gaps = self.gap_starts()
         new = {}
-        # Direct call / tail targets that are not function starts.
         for f in self.funcs:
             for site, t, tthumb in f.calls:
                 if t not in self.func_at and self.text_lo <= t < self.text_hi:
@@ -234,10 +212,7 @@ class Discover:
                     if t not in g.insns and (t in gaps or self.in_gap(t)):
                         new.setdefault(t, (tthumb, 'tail'))
                     elif t in g.insns and g.thumb == tthumb:
-                        # A jump into the middle of another function: split it
-                        # there; the first part then falls through into it.
                         new.setdefault(t, (tthumb, 'split'))
-        # Data pointers (bit 0 = Thumb) at the start of an unreached gap.
         for sec, at, v in self.data_words:
             a = v & ~1
             if a in self.func_at or a in new:
@@ -245,7 +220,6 @@ class Discover:
             g = gaps.get(a)
             if g is not None and self.looks_like_entry(a, bool(v & 1), g.end):
                 new[a] = (bool(v & 1), 'data ' + sec)
-        # Unreached gaps that open with a prologue (same mode, then the other).
         for a, g in gaps.items():
             if a in new or a in self.func_at:
                 continue
@@ -261,13 +235,6 @@ class Discover:
         return addr + (4 if f.thumb else 8)
 
     def walk(self, f):
-        """Recursive descent from the entry.
-
-        Address constants that point inside the function are code entries
-        (SjLj resume points, computed gotos) only if they carry the Thumb bit
-        in Thumb code or sit right after an unconditional jump; the others
-        are data (e.g. 'add r0, pc, #0x24' taking the address of a float).
-        """
         if f.walked:
             return
         f.walked = True
@@ -296,9 +263,9 @@ class Discover:
         md = self.md[f.thumb]
         code = self.m.read(x, f.end - x)
         addr = x
-        regs = {}                # reg -> tracked value (see track)
+        regs = {}
         last = None
-        hist = []                # recent instructions in this run
+        hist = []
         for ins in md.disasm(code, x):
             addr = ins.address
             if addr in f.insns:
@@ -314,12 +281,9 @@ class Discover:
             self.track(f, ins, regs)
             if addr >= f.end:
                 break
-        # Decoding ended without a terminator.
         if addr >= f.end:
             site = last.address if last else x
             if addr == f.end and f.end in self.func_at:
-                # Runs on into the next function (a split, or a missed no-return
-                # call): becomes a tail call to it.
                 f.tails.append((site, f.end, False, f.thumb))
                 f.flags.append(('fallthrough', site, '%x' % f.end))
                 return
@@ -340,14 +304,6 @@ class Discover:
         return self.m.names.get(t, 'sub_%x' % t)
 
     def track(self, f, ins, regs):
-        """Follow simple register values inside one run.
-
-        ('c', v)            constant
-        ('s', reg, k)       unknown register shifted left by k
-        ('i', c, reg, k)    c + (reg << k)
-        ('l', c, reg, k)    word loaded from c + (reg << k)   (table entry)
-        Constants that land in __text go to note_value (code pointers).
-        """
         M = 0xFFFFFFFF
         iid, ops = ins.id, ins.operands
         _, written = ins.regs_access()
@@ -426,7 +382,6 @@ class Discover:
                         new = ('l', vb[1], mem.index, mem.lshift)
                     elif vi is not None and vi[0] == 'c' and (vb is None or vb[0] == 's'):
                         new = ('l', vi[1], vb[1] if vb else mem.base, vb[2] if vb else 0)
-        # Data read through a computed address inside the function is literal data.
         size = LOAD_SIZE.get(iid)
         if size and len(ops) >= 2 and ops[1].type == A.ARM_OP_MEM:
             mem = ops[1].mem
@@ -446,15 +401,12 @@ class Discover:
             if new[0] == 'c' and iid not in (A.ARM_INS_MOVW, A.ARM_INS_LDR, A.ARM_INS_ADR) and \
                     not (iid in (A.ARM_INS_ADD, A.ARM_INS_SUB) and not f.thumb and len(ops) == 3 and
                          ops[1].type == A.ARM_OP_REG and ops[1].reg == PC and ops[2].type == A.ARM_OP_IMM):
-                # pc + register (a loaded offset) = PIC code address, e.g. the
-                # SjLj dispatch block stored into the function context.
                 pic = iid == A.ARM_INS_ADD and any(
                     o.type == A.ARM_OP_REG and o.reg == PC for o in ops[1:]) and \
                     ops[-1].type == A.ARM_OP_REG
                 self.note_value(f, ins.address, new[1], pic=pic)
 
     def jump_const(self, f, ins, v, interwork, cond, work):
-        """A jump through a register whose value is known."""
         t = v & ~1
         thumb = bool(v & 1) if interwork else f.thumb
         if f.start <= t < f.end and thumb == f.thumb:
@@ -465,14 +417,12 @@ class Discover:
             f.ctl[ins.address] = ('tail', t)
 
     def classify(self, f, ins, work, regs, hist):
-        """Record what the instruction does; return True if the run ends here."""
         iid = ins.id
         cond = ins.cc not in (CC_AL, A.ARM_CC_INVALID)
         ops = ins.operands
         _, written = ins.regs_access()
         pcw = PC in written
 
-        # PC-relative data, address constants
         for op in ops:
             if op.type == A.ARM_OP_MEM and op.mem.base == PC and op.mem.index == 0:
                 lit = (self.pc_value(f, ins.address) & ~3) + op.mem.disp
@@ -489,7 +439,6 @@ class Discover:
             tgt = (self.pc_value(f, ins.address) & ~3) + ops[1].imm
             self.note_value(f, ins.address, tgt, adr=True)
 
-        # Branches and calls
         if iid in (A.ARM_INS_BL, A.ARM_INS_BLX) and ops[0].type == A.ARM_OP_IMM:
             t = ops[0].imm & 0xFFFFFFFF
             tthumb = f.thumb if iid == A.ARM_INS_BL else not f.thumb
@@ -505,7 +454,7 @@ class Discover:
                 if t in self.noreturn:
                     return not cond
             return False
-        if iid == A.ARM_INS_BLX:                      # blx reg
+        if iid == A.ARM_INS_BLX:
             f.icalls.append(ins.address)
             return False
         if iid in (A.ARM_INS_CBZ, A.ARM_INS_CBNZ):
@@ -529,14 +478,12 @@ class Discover:
             return True
         if iid in (A.ARM_INS_TRAP, A.ARM_INS_UDF, A.ARM_INS_BKPT):
             return not cond
-        # ARM 'add/sub rX, pc, #imm' = address of a label (SjLj resume point).
         if iid in (A.ARM_INS_ADD, A.ARM_INS_SUB) and not f.thumb and len(ops) == 3 and \
                 ops[1].type == A.ARM_OP_REG and ops[1].reg == PC and ops[2].type == A.ARM_OP_IMM:
             v = self.pc_value(f, ins.address)
             v = v + ops[2].imm if iid == A.ARM_INS_ADD else v - ops[2].imm
             v &= 0xFFFFFFFF
             if pcw:
-                # 'add pc, pc, #imm': a plain jump (skips the SjLj resume point).
                 self.branch(f, ins, v, cond, work)
                 f.ctl[ins.address] = ('br', v)
                 return not cond
@@ -545,7 +492,6 @@ class Discover:
         if not pcw:
             return False
 
-        # Other writes to PC ------------------------------------------------
         text = ins.mnemonic + ' ' + ins.op_str
         if iid in (A.ARM_INS_POP, A.ARM_INS_LDM) or \
                 (iid == A.ARM_INS_LDR and ops[1].mem.base == SP):
@@ -563,7 +509,6 @@ class Discover:
         if iid == A.ARM_INS_MOV and ops[1].type == A.ARM_OP_REG and ops[1].shift.type == 0:
             v = regs.get(ops[1].reg)
             if v is not None and v[0] == 'c':
-                # ARM-state MOV PC interworks on ARMv7, Thumb-state does not.
                 self.jump_const(f, ins, v[1], not f.thumb, cond, work)
                 return not cond
             if v is not None and v[0] == 'i' and v[3] == 2:
@@ -587,8 +532,6 @@ class Discover:
         return self.m.file_offset(a) is not None and self.m.file_offset(a + 3) is not None
 
     def note_value(self, f, site, v, adr=False, pic=False):
-        """A constant the code builds: keep it if it points into code.
-        cand bits: 1 = Thumb bit set, 2 = built as pc + register (PIC code address)."""
         a = v & ~1
         if not (self.text_lo <= a < self.text_hi):
             return
@@ -602,7 +545,6 @@ class Discover:
             work.append(t)
             f.preds.setdefault(t, []).append(ins.address)
             if not cond:
-                # SjLj setjmp jumps over its resume point: remember the skip.
                 f.after_uncond[ins.address + ins.size] = t
             if cond:
                 nxt = ins.address + ins.size
@@ -610,9 +552,7 @@ class Discover:
         else:
             f.tails.append((ins.address, t, cond, f.thumb))
 
-    # jump tables
     def back_from(self, f, a, n):
-        """Up to n already-walked instructions just before address a, oldest first."""
         md = self.md[f.thumb]
         back = []
         for _ in range(n):
@@ -627,11 +567,6 @@ class Discover:
         return list(reversed(back))
 
     def prev_insns(self, f, hist, n=20):
-        """Up to n instructions before the last one of hist, oldest first.
-
-        When the run is short (the bounds check sits in the block before),
-        earlier instructions are re-decoded from what the walk already found.
-        """
         prev = hist[:-1][-n:]
         if len(prev) >= n:
             return prev
@@ -639,7 +574,6 @@ class Discover:
         return self.back_from(f, first, n - len(prev)) + prev
 
     def cmp_imm(self, prev, i):
-        """Immediate of the compare prev[i]: '#N', or a register set by mov/movw #N before."""
         ops = prev[i].operands
         if ops[1].type == A.ARM_OP_IMM:
             return ops[1].imm
@@ -678,13 +612,6 @@ class Discover:
         return None
 
     def bound_from_cmp(self, f, hist, reg):
-        """Find 'cmp rX, #N' guarding a table; return N+1 entries.
-
-        First the index register itself; otherwise (unoptimised code spills
-        the index between the check and the table) the nearest compare with
-        an immediate that a conditional HI/LS branch or table uses. If the
-        check is in a block that branches here, look before that branch.
-        """
         n = self.bound_in(self.prev_insns(f, hist), reg, hist[-1].cc == A.ARM_CC_LS)
         if n is not None:
             return n
@@ -700,7 +627,6 @@ class Discover:
         return None
 
     def insn_table(self, f, ins, hist, v, work):
-        """'mov pc, rX' with rX = base + idx*4: a run of branch instructions."""
         base = v[1]
         n = self.bound_from_cmp(f, hist, v[2])
         if n is None:
@@ -710,7 +636,6 @@ class Discover:
         self.add_targets(f, ins, 'insn', base, 0, targets, work)
 
     def rel_table(self, f, ins, hist, work, regs):
-        """'add pc, rA, rB' where rB = table base and rA = loaded table entry."""
         ra, rb = ins.operands[1].reg, ins.operands[2].reg
         prev = self.prev_insns(f, hist)
         base = None
@@ -747,9 +672,6 @@ class Discover:
         return True
 
     def add_targets(self, f, ins, kind, base, size, targets, work):
-        """Record a jump table. Entries pointing outside the function cannot be
-        taken (e.g. a tbb whose last 'entry' is the next instruction's byte);
-        they stay in the list as None so the code generator emits a trap."""
         bad = [t for t in targets if t is not None and not (f.start <= t < f.end)]
         if bad:
             f.flags.append(('table_entry_dropped', ins.address, '%d' % len(bad)))
@@ -776,8 +698,6 @@ class Discover:
         raw = self.m.read(base, n * esz)
         vals = list(raw) if esz == 1 else [raw[i] | raw[i + 1] << 8 for i in range(0, len(raw), 2)]
         targets = [base + 2 * v for v in vals]
-        # The table cannot run past the first case code after it: entries
-        # beyond that are bytes of instructions (that index never happens).
         k = n
         while True:
             after = [t for t in targets[:k] if t > base]
@@ -798,7 +718,7 @@ class Discover:
         if mem.base == PC:
             base = self.pc_value(f, ins.address)
         else:
-            v = regs.get(mem.base)   # adr rB, table ; ldr pc, [rB, rX, lsl #2]
+            v = regs.get(mem.base)
             base = v[1] if v is not None and v[0] == 'c' else None
         if base is None or n is None or mem.lshift != 2:
             f.ijumps.append((ins.address, ins.mnemonic + ' ' + ins.op_str))
@@ -829,7 +749,7 @@ class Discover:
             for site, t, cond, tthumb in f.tails:
                 g = self.func_at.get(t)
                 if self.stub_lo <= t < self.stub_hi:
-                    continue             # tail call to an import
+                    continue
                 if g is None:
                     f.flags.append(('branch_into_other', site, '%x' % t))
                 elif g.thumb != tthumb:
@@ -838,12 +758,9 @@ class Discover:
                 a = v & ~1
                 g = self.func_at.get(a)
                 if g is not None and a != f.start and g.thumb != bool(v & 1):
-                    # An even value at a Thumb start can be a plain data address; only note it.
                     f.flags.append(('ref_mode_mismatch', site, '%x' % v))
 
     def check_consistency(self):
-        """Every byte belongs to at most one instruction; table and literal data
-        never overlap code (a too-large table bound or a wrong decode would)."""
         for f in self.funcs:
             owner = {}
             for a, n in f.insns.items():
@@ -852,8 +769,6 @@ class Discover:
                         f.flags.append(('insn_overlap', a, '%x' % owner[b]))
                         break
                     owner[b] = a
-            # A tbb entry of 0 jumps onto the table itself: its bytes then run as
-            # an instruction (e.g. 01 00 = movs r1, r0). That overlap is real.
             run_as_code = {t['base'] for t in f.tables if t['kind'] in ('tbb', 'tbh')
                            and t['base'] in t['targets']}
             for a, n in f.literals.items():
@@ -869,7 +784,6 @@ class Discover:
                         f.flags.append(('table_target_not_insn', t['site'], '%x' % x))
 
     def scan_data_pointers(self):
-        """Words in data that point into __text: function pointers (vtables, IMPs...)."""
         m = self.m
         self.data_ptrs = Counter()
         self.data_bad = []
@@ -895,7 +809,6 @@ class Discover:
                     self.data_bad.append((s.seg + ',' + s.name, s.addr + i, v))
 
     def coverage(self, f):
-        """Classify bytes of [start, end) not covered by code or literal data."""
         covered = bytearray(f.end - f.start)
         for a, n in f.insns.items():
             covered[a - f.start:a - f.start + n] = b'\1' * n
@@ -924,7 +837,6 @@ class Discover:
             if self.is_padding(chunk, f.thumb, g):
                 pad += j - i
             elif any(g <= d < g + 4 for d in f.datarefs):
-                # Data whose address the code takes (adr / add rX, pc, #imm).
                 self.last_dataref_bytes += j - i
             else:
                 unreached += j - i
@@ -938,13 +850,10 @@ class Discover:
         nops = THUMB_NOPS if thumb else ARM_NOPS
         if len(chunk) % step == 0 and all(chunk[k:k + step] in nops for k in range(0, len(chunk), step)):
             return True
-        # Alignment before a 4-aligned literal pool / next function: up to 3 bytes.
         return len(chunk) < 4 and (addr + len(chunk)) % 4 == 0 and not chunk.strip(b'\0\xbf')
 
 
 def runs_of(f):
-    """Instructions as [start, end) ranges of back-to-back instructions; decoding
-    each range linearly from its start gives exactly the walked instructions."""
     runs = []
     for a in sorted(f.insns):
         n = f.insns[a]
@@ -1014,8 +923,6 @@ def main():
             'ctl': sorted([s, k, t] for s, (k, t) in f.ctl.items()),
             'flags': [[k, s, e] for k, s, e in f.flags],
         })
-    # Stubs and pointer slots: most lazy pointers are pre-bound to the game's own
-    # exported functions (C++ symbols); those calls become direct calls.
     m = d.m
     stubs = [{'addr': addr, 'name': name} for addr, name in sorted(m.stubs.items())]
     slots = []

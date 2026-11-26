@@ -1,9 +1,3 @@
-"""Print a game function's instructions (from build/gen's comments) with what its pc-relative
-addresses are: selectors, class references, C strings, CFStrings, imports.
-
-Usage: python -I tools/fdis.py 0x5cb95 [max_lines]
-The address may have the Thumb bit; calls show the callee (import name or F_<addr>).
-"""
 import glob
 import os
 import re
@@ -53,7 +47,6 @@ def describe(m, a, sects):
 
 
 def xrefs(target):
-    """Every instruction whose movw/movt + pc arithmetic lands on target (all of build/gen)."""
     pat = re.compile(r'/\* ([0-9a-f]+) (.*) \*/')
     fn_pat = re.compile(r'^void F_([0-9a-f]+)\(CPU \*c\) \{')
     starts = {}
@@ -66,7 +59,6 @@ def xrefs(target):
             if fm:
                 fn = int(fm.group(1), 16)
                 regs = {}
-                # Thumb if the next instruction is 2 bytes after this one
                 a = [int(x.group(1), 16) for x in (pat.search(lines[j]) for j in range(k + 1, min(k + 12, len(lines)))) if x]
                 thumb = len(a) > 1 and a[1] - a[0] == 2
                 continue

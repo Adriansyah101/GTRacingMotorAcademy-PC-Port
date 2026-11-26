@@ -1,15 +1,9 @@
-/* cf.c -- the rest of CoreFoundation the game imports, on the host's Foundation objects (CF types are
-   toll-free bridged on iOS, so a CFBundleRef is an NSBundle, a CFURLRef an NSURL, and so on):
-   CFBundle, CFURL, CFUUID, CFReadStream (files), CFBitVector, CFNotificationCenter (Darwin
-   notifications: nobody posts any). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "ns.h"
-
-/* CFBundle */
 
 u32 h_CFBundleGetMainBundle(void) { return msg0(ns_class("NSBundle"), "mainBundle"); }
 u32 h_CFBundleGetIdentifier(u32 b) { return msg0(b, "bundleIdentifier"); }
@@ -19,7 +13,6 @@ u32 h_CFBundleCopyBundleURL(u32 b)
 {
     return objc_retain(msg1(ns_class("NSURL"), "fileURLWithPath:", msg0(b, "bundlePath")));
 }
-/* NumVersion: major (BCD), minor and bug nibbles, stage (0x80 final), non-release */
 u32 h_CFBundleGetVersionNumber(u32 b)
 {
     const char *v = ns_utf8(msg1(b, "objectForInfoDictionaryKey:", ns_string("CFBundleVersion")));
@@ -27,8 +20,6 @@ u32 h_CFBundleGetVersionNumber(u32 b)
     sscanf(v, "%u.%u.%u", &ma, &mi, &bug);
     return ((ma / 10 % 10) << 28 | (ma % 10) << 24) | (mi & 15) << 20 | (bug & 15) << 16 | 0x8000;
 }
-
-/* CFURL */
 
 u32 h_CFURLCopyFileSystemPath(u32 url, u32 style)
 {
@@ -40,7 +31,6 @@ u32 h_CFURLCreateWithFileSystemPath(u32 alloc, u32 path, u32 style, u32 is_dir)
     (void)alloc, (void)style, (void)is_dir;
     return objc_retain(msg1(ns_class("NSURL"), "fileURLWithPath:", path));
 }
-/* percent-escapes everything but unreserved characters and `leave`, and also `legal` */
 u32 h_CFURLCreateStringByAddingPercentEscapes(u32 alloc, u32 str, u32 leave, u32 legal, u32 enc)
 {
     (void)alloc, (void)enc;
@@ -63,8 +53,6 @@ u32 h_CFURLCreateStringByReplacingPercentEscapesUsingEncoding(u32 alloc, u32 str
     (void)alloc, (void)leave, (void)enc;
     return objc_retain(msg1(str, "stringByReplacingPercentEscapesUsingEncoding:", 4));
 }
-
-/* CFUUID */
 
 typedef struct { u32 isa; u8 b[16]; } Uuid;
 u32 h_CFUUIDCreate(u32 alloc)
@@ -96,8 +84,6 @@ u32 h_CFUUIDCreateString(u32 alloc, u32 uuid)
     return ns_string_new(s, 36);
 }
 
-/* CFReadStream on files */
-
 typedef struct { u32 isa; FILE *f; u32 path; int status; } Stream;
 u32 h_CFReadStreamCreateWithFile(u32 alloc, u32 url)
 {
@@ -111,7 +97,7 @@ u32 h_CFReadStreamOpen(u32 s)
     Stream *x = GP(s);
     char host[1024];
     x->f = fopen(gt_host_path(ns_utf8(x->path), host, sizeof host), "rb");
-    x->status = x->f ? 2 : 7;     /* kCFStreamStatusOpen / Error */
+    x->status = x->f ? 2 : 7;
     return x->f != NULL;
 }
 u32 h_CFReadStreamRead(u32 s, u32 buf, u32 len)
@@ -127,10 +113,8 @@ void h_CFReadStreamClose(u32 s)
     if (x->f)
         fclose(x->f);
     x->f = NULL;
-    x->status = 6;                /* kCFStreamStatusClosed */
+    x->status = 6;
 }
-
-/* CFBitVector: bit 0 is the most significant bit of the first byte */
 
 typedef struct { u32 isa; u32 bits; u8 *p; } Bits;
 static id bits_new(const u8 *src, u32 nbits, u32 cap)
@@ -170,8 +154,6 @@ void h_CFBitVectorSetBitAtIndex(u32 bv, u32 i, u32 v)
     else
         b->p[i / 8] &= (u8)~(0x80 >> i % 8);
 }
-
-/* CFNotificationCenter (Darwin / local): nobody posts */
 
 static u32 center_cell = 0xCF00;
 u32 h_CFNotificationCenterGetLocalCenter(void) { return GA(&center_cell); }

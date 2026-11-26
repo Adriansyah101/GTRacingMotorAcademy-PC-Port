@@ -1,14 +1,3 @@
-/* ns_coll.c -- NSNumber, NSValue, NSNull, NSArray, NSDictionary, NSSet, NSData, enumerators
-   and the CFArray / CFDictionary / CFNumber functions.
-
-   Host layouts (mutable and immutable share one concrete class each, as on iOS):
-     array       {isa, count, capacity, id *items, mutations}
-     dictionary  {isa, count, capacity, id *keys, id *values, u32 *hashes, u32 *slots, nslots,
-                  mutations, raw}            (sets: the same, values unused)
-     number      {isa, type, low, high}
-     data        {isa, bytes, length, capacity, owns}
-   `raw` marks CF containers made with NULL callbacks: plain pointers, compared by address and
-   not retained. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,15 +21,12 @@ static u32 cls_arr, cls_marr, cls_arrM, cls_dict, cls_mdict, cls_dictM, cls_set,
 static u32 cls_num, cls_cfnum, cls_cfbool, cls_data, cls_mdata, cls_cfdata, cls_enum, cls_null, cls_val, cls_cval;
 static id null_obj, yes_obj, no_obj;
 
-/* CF callback structures: their addresses say "retain the objects" (dataimp.c hands them out) */
 u32 ns_cf_callbacks[3][8];
 
 static void bad_index(const char *what, u32 i, u32 n)
 {
     rt_fatal("%s: index %u beyond bounds [0 .. %d] (NSRangeException)", what, i, (int)n - 1);
 }
-
-/* equality, hashing */
 
 int ns_is_number(id o)
 {
@@ -76,8 +62,6 @@ u32 ns_hash(id o)
     }
     return msg0(o, "hash");
 }
-
-/* NSNumber */
 
 static id num_make(char type, u64 bits)
 {
@@ -139,7 +123,6 @@ static const char *const num_cluster[] = {"NSNumber", "__NSCFNumber", "NSDecimal
 
 static void n_alloc(CPU *c) { ret_i(c, ns_cluster_alloc(SELF, num_cluster, cls_cfnum, sizeof(Num))); }
 
-/* numberWithX: / initWithX: share one table: the selector's type letter */
 static char sel_type(const char *s)
 {
     static const struct { const char *name; char t; } tab[] = {
@@ -241,13 +224,11 @@ static void n_retain_self(CPU *c) { ret_i(c, objc_retain(SELF)); }
 static void n_immortal(CPU *c) { (void)c; }
 static void n_rc(CPU *c) { ret_i(c, 0x7fffffff); }
 
-/* NSValue */
-
 static id val_make(const void *p, u32 n, const char *type)
 {
     id o = ns_alloc(cls_cval, sizeof(Val));
     Val *v = GP(o);
-    size_t tl = strlen(type);                    /* an @encode string: cut to the field's size */
+    size_t tl = strlen(type);
     if (tl >= sizeof v->type)
         tl = sizeof v->type - 1;
     memcpy(v->type, type, tl);
@@ -285,7 +266,6 @@ static void v_withPointer(CPU *c)
 }
 static u32 type_size(const char *t)
 {
-    /* sizes of the encodings NSValue is used with here */
     u32 n = 0;
     for (; *t; t++) {
         switch (*t) {
@@ -311,7 +291,6 @@ static u32 type_size(const char *t)
 }
 static void v_withBytes(CPU *c)
 {
-    /* value:withObjCType: / valueWithBytes:objCType: */
     const char *t = GP(ARG(1));
     u32 n = type_size(t);
     ret_i(c, val_make(GP(ARG(0)), n ? n : 4, t));
@@ -330,13 +309,11 @@ static void v_getValue(CPU *c)
 static void v_objCType(CPU *c) { ret_i(c, GA(((Val *)GP(SELF))->type)); }
 static void v_stret_copy(CPU *c)
 {
-    /* CGPointValue / CGSizeValue / CGRectValue / CGAffineTransformValue: stret */
     Val *v = GP(ST_SELF);
     memcpy(GP(ST_RET), v->bytes, v->n);
 }
 static void v_point(CPU *c)
 {
-    /* CGPoint/CGSize are 8 bytes: stret too on iOS ARM */
     v_stret_copy(c);
 }
 static void v_pointer(CPU *c) { ret_i(c, *(u32 *)((Val *)GP(SELF))->bytes); }
@@ -347,13 +324,9 @@ static void v_isEqual(CPU *c)
     ret_i(c, o == SELF || (o && rd32(o) == cls_cval && a->n == b->n && !memcmp(a->bytes, b->bytes, a->n)));
 }
 
-/* NSNull */
-
 id ns_null(void) { return null_obj; }
 static void null_null(CPU *c) { ret_i(c, null_obj); }
 static void null_description(CPU *c) { ret_i(c, ns_string("<null>")); }
-
-/* arrays */
 
 int ns_is_array(id o) { return o && rd32(o) == cls_arrM; }
 
@@ -447,7 +420,6 @@ id ns_array_at(id o, u32 i)
     return msg1(o, "objectAtIndex:", i);
 }
 
-/* the objects of any array (host or not) into a malloc'd list */
 static u32 *items_of(id o, u32 *n)
 {
     *n = ns_array_count(o);
@@ -461,7 +433,6 @@ static const char *const arr_cluster[] = {"NSArray", "NSMutableArray", "__NSArra
 static void a_alloc(CPU *c) { ret_i(c, ns_cluster_alloc(SELF, arr_cluster, cls_arrM, sizeof(Arr))); }
 static int host_arr(id o) { return o && rd32(o) == cls_arrM; }
 
-/* class constructors: autoreleased host arrays (game subclasses get alloc + init...) */
 static id arr_from(u32 cls, const u32 *v, u32 n)
 {
     if (cls != cls_arr && cls != cls_marr && cls != cls_arrM) {
@@ -471,7 +442,6 @@ static id arr_from(u32 cls, const u32 *v, u32 n)
     return objc_autorelease(ns_array_new(v, n));
 }
 
-/* nil-terminated variadic objects starting at word `first` */
 static u32 *nil_list(CPU *c, int first, u32 *n)
 {
     u32 w[VA_WORDS];
@@ -589,7 +559,7 @@ static void a_getObjects(CPU *c)
 static id enum_make(id arr)
 {
     id e = ns_alloc(cls_enum, sizeof(Enum));
-    ((Enum *)GP(e))->arr = arr;     /* +1 owned */
+    ((Enum *)GP(e))->arr = arr;
     return objc_autorelease(e);
 }
 static void a_objectEnumerator(CPU *c)
@@ -610,7 +580,6 @@ static void a_reverseObjectEnumerator(CPU *c)
     free(v);
 }
 
-/* NSFastEnumerationState {state, itemsPtr, mutationsPtr, extra[5]} */
 static u32 fast_enum(u32 state, u32 *items, u32 n, u32 *muts)
 {
     if (rd32(state))
@@ -689,7 +658,6 @@ static void a_subarray(CPU *c)
     free(v);
 }
 
-/* stable merge sort with a guest comparison */
 typedef struct { SEL sel; u32 fn, ctx; } SortBy;
 static int sort_cmp(const SortBy *s, u32 a, u32 b)
 {
@@ -872,8 +840,6 @@ static void ma_sortUsingFunction(CPU *c)
     ARR(SELF)->muts++;
 }
 
-/* enumerators */
-
 static void e_nextObject(CPU *c)
 {
     Enum *e = GP(SELF);
@@ -899,8 +865,6 @@ static void e_dealloc(CPU *c)
     objc_release(((Enum *)GP(SELF))->arr);
     objc_free_instance(SELF);
 }
-
-/* dictionaries and sets */
 
 int ns_is_dict(id o) { return o && rd32(o) == cls_dictM; }
 static int host_dict(id o) { return o && (rd32(o) == cls_dictM || rd32(o) == cls_setM); }
@@ -971,7 +935,6 @@ static void d_set(id o, id k, id v)
         d->v = realloc(d->v, d->cap * 4);
         d->h = realloc(d->h, d->cap * 4);
     }
-    /* keys are copied (a mutable string key must not change under the dictionary) */
     id key = k;
     if (!(d->raw & 1))
         key = ns_is_string(k) ? msg1(k, "copyWithZone:", 0) : objc_retain(k);
@@ -1046,7 +1009,6 @@ u32 ns_dict_count(id o) { return host_dict(o) ? DICT(o)->n : o ? msg0(o, "count"
 id ns_dict_key_at(id o, u32 i) { return DICT(o)->k[i]; }
 id ns_dict_val_at(id o, u32 i) { return DICT(o)->v[i]; }
 
-/* keys and values of any dictionary */
 static u32 dict_pairs(id o, u32 **keys, u32 **vals)
 {
     if (host_dict(o)) {
@@ -1088,7 +1050,6 @@ static void d_withObjectForKey(CPU *c)
     u32 v = ARG(0), k = ARG(1);
     ret_i(c, dict_from(SELF, &k, &v, 1));
 }
-/* objects and keys alternate, nil-terminated, from word `first` */
 static u32 obj_key_list(CPU *c, int first, u32 **keys, u32 **vals)
 {
     u32 w[VA_WORDS];
@@ -1215,7 +1176,6 @@ static void d_allKeysForObject(CPU *c)
 }
 static void d_keysSortedByValue(CPU *c)
 {
-    /* sort the keys by their values with the selector */
     Dict *d = DICT(SELF);
     u32 n = d->n, *idx = malloc(4 * (size_t)n + 4);
     u32 *vals = malloc(4 * (size_t)n + 4);
@@ -1342,7 +1302,6 @@ static void md_setDictionary(CPU *c)
     free(v);
 }
 
-/* sets: dictionaries whose values are the keys */
 static const char *const set_cluster[] = {"NSSet", "NSMutableSet", "__NSSetM", NULL};
 static void st_alloc(CPU *c) { ret_i(c, ns_cluster_alloc(SELF, set_cluster, cls_setM, sizeof(Dict))); }
 static id set_from(const u32 *v, u32 n)
@@ -1444,8 +1403,6 @@ static void st_isEqualToSet(CPU *c)
     ret_i(c, eq);
 }
 
-/* NSData */
-
 int ns_is_data(id o) { return o && rd32(o) == cls_cfdata; }
 
 static void data_reserve(Data *d, u32 n)
@@ -1494,7 +1451,6 @@ static void dt_data(CPU *c) { ret_i(c, objc_autorelease(ns_data_new(NULL, 0))); 
 static void dt_withBytes(CPU *c) { ret_i(c, objc_autorelease(ns_data_new(GP(ARG(0)), ARG(1)))); }
 static void dt_withBytesNoCopy(CPU *c)
 {
-    /* dataWithBytesNoCopy:length:[freeWhenDone:] -- the bytes are taken over */
     id o = ns_alloc(cls_cfdata, sizeof(Data));
     Data *d = DATA(o);
     d->p = GP(ARG(0));
@@ -1612,14 +1568,13 @@ static void dt_dealloc(CPU *c)
     if (d->own == 1)
         free(d->p);
     else if (d->own == 2)
-        free(d->p);         /* NoCopy data came from the game's malloc, which is the host's */
+        free(d->p);
     objc_free_instance(SELF);
 }
 static void dt_bytes(CPU *c) { ret_i(c, GA(DATA(SELF)->p)); }
 static void dt_length(CPU *c) { ret_i(c, DATA(SELF)->n); }
 static void dt_getBytes(CPU *c)
 {
-    /* getBytes: / getBytes:length: / getBytes:range: */
     Data *d = DATA(SELF);
     SEL s = c->r[1];
     u32 loc = 0, len = d->n;
@@ -1686,7 +1641,6 @@ static void dt_increaseLength(CPU *c)
 }
 static void dt_append(CPU *c)
 {
-    /* appendBytes:length: / appendData: */
     Data *d = DATA(SELF);
     u32 n;
     const u8 *p;
@@ -1747,8 +1701,6 @@ static void dt_base64(CPU *c)
     buf_free(&b);
 }
 
-/* descriptions */
-
 static void indent_to(Buf *b, int n)
 {
     for (int i = 0; i < n; i++)
@@ -1781,8 +1733,6 @@ static void describe(Buf *b, id o, int ind)
     }
 }
 static void d_description(CPU *c) { a_description(c); }
-
-/* CF functions */
 
 void h_CFRelease(u32 o)
 {
@@ -1837,8 +1787,6 @@ u32 h_CFDictionaryGetValueIfPresent(u32 d, u32 k, u32 out)
 void h_CFDictionarySetValue(u32 d, u32 k, u32 v) { d_set(d, k, v); }
 void h_CFDictionaryRemoveValue(u32 d, u32 k) { d_remove(d, k); }
 
-/* CFNumberType: 1 SInt8, 2 SInt16, 3 SInt32, 4 SInt64, 5 Float32, 6 Float64, 7 char, 8 short,
-   9 int, 10 long, 11 long long, 12 float, 13 double, 14 CFIndex, 15 NSInteger, 16 CGFloat */
 u32 h_CFNumberGetValue(u32 n, u32 type, u32 out)
 {
     switch (type) {
@@ -1851,8 +1799,6 @@ u32 h_CFNumberGetValue(u32 n, u32 type, u32 out)
     }
     return 1;
 }
-
-/* registration */
 
 static void make_bool(id *o, int v)
 {

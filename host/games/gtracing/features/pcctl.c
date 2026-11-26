@@ -1,72 +1,33 @@
-/* pcctl.c -- PC_CONTROLS (port addition): a Touch Screen On/Off switch in Options > Controls, and with it Off the
-   keyboard / gamepad options: camera tilt on/off, transmission manual/automatic, auto gas on/off.
-
-   Options > Controls gets a "Touch Screen" On/Off row under its panel.
-   - On: the game's own Controls menu, as it was (presets, Edit, sensitivity); the keys
-     and the pad keep working on top of whatever is chosen there.
-   - Off (keyboard / gamepad; the default on a PC when no choice is saved, GT_TOUCH_SCREEN=1 starts On): the panel's touch contents are hidden and three rows take their place:
-       Camera Tilt   On / Off          the camera leans with the steering: CGameSettings +0x70, the
-                                       Game Settings > Camera horizon switch (its menu, 0x24c1f0, shows
-                                       it On for 1).  In a race 1 = the view rolls (not a
-                                       level horizon, as the menu's wording suggests), so
-                                       Camera Tilt is the byte as it is.
-                                       Off by default; kept in pc_controls.txt (camera_tilt_frame)
-       Auto Gas      On / Off          throttle setting +0x58: 4 (automatic gas, brake only) or 0 (pedals)
-       Transmission  Manual / Automatic  gearbox setting +0x60: 0 (manual, the gear keys shift) or 2
-     and the steering setting +0x5c is tilt (2), which the keys and the stick drive (steer.c tilt_feed),
-     with no wheel or side buttons on the screen.  These are held every frame, races included (an
-     event that sets its own controls for the race, as the Test Center does, gets the player's keyboard
-     choices instead).  The touch choices (+0x5c, +0x58, +0x60) are followed while the menus show them
-     (not in a race, where they may be the event's) and put back when Touch Screen goes On again (after
-     the race, if that is done from the pause menu: the race restores the settings it started with).
-     Before the start the game waits for a touch ("Touch to continue", race states 0 and 1): in this
-     mode a press of gas or gear up gives it (pcinput.c), so a race needs no mouse.
-   The rows are the game's own widgets, copied into ControlsMenu by tools/swfpatch_controls.py at build
-   time (build\host\patch, read in place of the bundle's menu SWFs by ns_misc.c gt_host_path): PCTouch,
-   PCTilt, PCGas, PCGearTitle, PCGear.  This file names them, shows the ones the mode wants, keeps the
-   switches' states, and takes their clicks in ControlsMenu's event handler (vtable 0x788078: slot +0x2c
-   = 0x243a4c, at 0x7880a4; Game Settings' handler 0x247f60 toggles its switches the same way: label
-   "On" / "Off" on the switch's SliderOnOff, 0x50afc4; at rest frame 10 / 2, 0x50bc64).
-   The choices are saved in <home>\Library\Preferences\pc_controls.txt (the game's own settings go to its
-   save as usual).  GT_PC_CONTROLS=0: the original menu files and no rows.
-
-   KEY_MAP: a keyboard and gamepad buttons menu when Touch Screen is Off, with keys that
-   can be changed: under the three rows a "Keyboard / Gamepad" button (PCKeysOpen) turns the panel to
-   the PCKeys page: the nine driving actions, each with Key 1, Key 2 and Gamepad cells, and Default /
-   Back.  A click on a cell makes it wait for a key or a pad input (keymap.c, which keeps the keys);
-   this file only shows the page and its texts and takes the clicks.  The page goes back to the three
-   rows on Back, when the menu is entered again, and when Touch Screen goes On. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "features.h"
 #include "game.h"
 
-#define SET_STEERING 0x5c             /* 0 side buttons, 1 wheel, 2 tilt */
-#define SET_THROTTLE 0x58             /* 0 / 1 pedals, 2 slider, 3 tilt, 4 automatic gas */
-#define SET_GEARBOX 0x60              /* 0 manual (right), 1 manual (left), 2 automatic */
-#define SET_LEVEL_HORIZON 0x70        /* byte: 1 = the camera rolls with the tilt (checked in a race) */
+#define SET_STEERING 0x5c
+#define SET_THROTTLE 0x58
+#define SET_GEARBOX 0x60
+#define SET_LEVEL_HORIZON 0x70
 
-#define SWF_GOTO_FRAME 0x50bc64u      /* (player, path, frame, play) */
-#define SWF_PLAY_LABEL 0x50afc4u      /* (player, character, label, play) */
-#define SWF_VISIBLE 0xab              /* character byte: drawn and hit */
+#define SWF_GOTO_FRAME 0x50bc64u
+#define SWF_PLAY_LABEL 0x50afc4u
+#define SWF_VISIBLE 0xab
 
-#define CTL_VTBL 0x788078u            /* ControlsMenu's vtable */
-#define CTL_ENTER_FN 0x243320u        /* slot +0x14 */
-#define CTL_UPDATE_FN 0x243830u       /* slot +0x1c */
-#define CTL_EVENT_FN 0x243a4cu        /* slot +0x2c */
+#define CTL_VTBL 0x788078u
+#define CTL_ENTER_FN 0x243320u
+#define CTL_UPDATE_FN 0x243830u
+#define CTL_EVENT_FN 0x243a4cu
 
-static int on = -1;                   /* PC_CONTROLS itself (GT_PC_CONTROLS) */
+static int on = -1;
 static struct {
-    int touch;                        /* 1 touch screen, 0 keyboard / gamepad */
-    int manual, autogas;              /* the keyboard choices */
-    int touch_steer, touch_throttle, touch_gearbox;  /* the touch choices, while the keys rule (-1 none) */
-    int tilt;                         /* Camera Tilt with the keys (settings +0x70); -1: none saved yet */
-} cfg = {-1, 0, 0, -1, -1, -1, -1};  /* touch -1: no choice saved yet (pcctl_init picks the default) */
+    int touch;
+    int manual, autogas;
+    int touch_steer, touch_throttle, touch_gearbox;
+    int tilt;
+} cfg = {-1, 0, 0, -1, -1, -1, -1};
 
-/* the settings file */
 static const char *cfg_path(char *buf, size_t n)
 {
     char g[512];
@@ -111,7 +72,6 @@ static void cfg_save(void)
     fclose(f);
 }
 
-/* the game's settings */
 static u32 settings(void) { return *(volatile u8 *)GP(rd32(GT_SETTINGS_GUARD)) ? rd32(GT_SETTINGS) : 0; }
 
 static void set_int(u32 s, u32 off, int v, const char *what)
@@ -122,7 +82,6 @@ static void set_int(u32 s, u32 off, int v, const char *what)
     }
 }
 
-/* keyboard / gamepad: tilt steering (the keys feed it), the keyboard's gas and gearbox */
 static void keys_apply(void)
 {
     u32 s = settings();
@@ -133,16 +92,13 @@ static void keys_apply(void)
     set_int(s, SET_GEARBOX, cfg.manual ? 0 : 2, "gearbox");
 }
 
-/* a race is loaded (G+0x17ac; 0 again in the menus).  Some events set their own controls for the race
-   and put the player's back after it (the Test Center drives with tilt, pedals and a manual gearbox
-   while the save says wheel / automatic): during a race the settings are not the player's */
 static int in_race(void)
 {
     u32 g = gt_game();
     return g && rd32(g + G_RACE);
 }
 
-static int restore_after_race;        /* Touch Screen went on in a race: its settings again after it */
+static int restore_after_race;
 
 static void touch_restore(u32 s)
 {
@@ -161,7 +117,6 @@ static void set_touch(int touch)
         return;
     cfg.touch = touch;
     if (!touch) {
-        /* the touch choices are kept from the menus (pcctl_frame); from the race only if never seen */
         if (!in_race() || cfg.touch_steer < 0) {
             cfg.touch_steer = (int)rd32(s + SET_STEERING);
             cfg.touch_throttle = (int)rd32(s + SET_THROTTLE);
@@ -171,7 +126,6 @@ static void set_touch(int touch)
         keys_apply();
     } else {
         touch_restore(s);
-        /* the race may put back the settings it found at its start (the keys') when it ends */
         restore_after_race = in_race();
     }
     rt_log("[pcctl] Touch Screen %s%s\n", touch ? "on" : "off (keyboard / gamepad)", in_race() ? " (in a race)" : "");
@@ -184,20 +138,17 @@ static int camera_tilt(void)
     return s && *(volatile u8 *)GP(s + SET_LEVEL_HORIZON);
 }
 
-/* the menu */
 static u32 find(u32 pl, const char *path) { return rt_call2(GT_FN_SWF_FIND, pl, GA((void *)path)); }
 
-/* the parts of the touch menu hidden while the keys rule; ControlsMenu.<name> */
 static const char *const touch_parts[] = {
     "AllTabs.PresetChange", "AllTabs.Display", "AllTabs.SteeringChange", "AllTabs.ThrottleChange",
     "AllTabs.GearsChange", "AllTabs.btnSteeringTab", "AllTabs.btnThrottleTab", "AllTabs.btnGearsTab",
     "AllTabs.TabSmall1", "AllTabs.TabSmall2", "AllTabs.TabSmall3", "AllTabs.TabBig1", "AllTabs.TabBig2",
     "AllTabs.TabBig3", "btnCustom", "btnPresets", NULL};
-static u32 hidden_by_us[32];        /* the character we hid, per touch_parts entry */
+static u32 hidden_by_us[32];
 static const char *const key_rows[] = {"PCTilt", "PCGas", "PCGearTitle", "PCGear", "PCKeysOpen", NULL};
-static int keys_page;               /* KEY_MAP: the Keyboard / Gamepad page shows in place of key_rows */
-static int display_page;            /* DISPLAY_MENU (display.c): entered from Options' Display tile, only the
-                                       PCDisplay page shows */
+static int keys_page;
+static int display_page;
 
 static void set_visible(u32 ch, int v)
 {
@@ -205,7 +156,6 @@ static void set_visible(u32 ch, int v)
         *(volatile u8 *)GP(ch + SWF_VISIBLE) = (u8)v;
 }
 
-/* the switch's resting picture: frame 10 on, 2 off (as Game Settings' 0x24c150) */
 static void switch_rest(u32 pl, const char *row, int v)
 {
     char p[96];
@@ -221,8 +171,8 @@ static void set_text(u32 pl, const char *path, const char *text)
         rt_call4(GT_FN_SWF_SET_TEXT, pl, GA(p), GA((void *)text), 0);
 }
 
-static u32 shown_player;              /* the player the texts were set in (menus reload) */
-static int shown_keys = -1;           /* keymap_version() the cells show */
+static u32 shown_player;
+static int shown_keys = -1;
 
 static void hi(u32 pl, const char *cell, int v)
 {
@@ -231,7 +181,6 @@ static void hi(u32 pl, const char *cell, int v)
     set_visible(find(pl, p), v);
 }
 
-/* KEY_MAP: the cells' texts, and the yellow frame on the one waiting for a key */
 static void keys_fill(u32 pl)
 {
     char cell[32], p[48];
@@ -247,7 +196,6 @@ static void keys_fill(u32 pl)
     shown_keys = keymap_version();
 }
 
-/* the rows' texts and states, once each time the menu is entered */
 static void menu_fill(u32 pl)
 {
     char p[48];
@@ -277,7 +225,6 @@ static void menu_fill(u32 pl)
     shown_player = pl;
 }
 
-/* which rows show: every frame the menu runs, as the game's own animations may show its parts again */
 static void menu_layout(u32 pl)
 {
     char p[96];
@@ -320,8 +267,8 @@ static void ctl_enter_hook(CPU *c)
     u32 pl = rd32(self + 4);
     if (enter_logs++ < 20)
         rt_log("[pcctl] Controls menu entered (frame %u): Touch Screen %s\n", eagl_frames(), cfg.touch ? "on" : "off");
-    keys_page = 0;                      /* the three rows first */
-    display_page = display_take_page(); /* or Options > Display */
+    keys_page = 0;
+    display_page = display_take_page();
     keymap_cancel();
     if (pl) {
         menu_fill(pl);
@@ -343,7 +290,6 @@ static void ctl_update_hook(CPU *c)
     }
 }
 
-/* a click on one of our rows: [ev] control, [ev+4] its name, [ev+8] kind (6 = released on it) */
 static void ctl_event_hook(CPU *c)
 {
     u32 self = c->r[0], ev = c->r[1], pl = rd32(self + 4);
@@ -363,16 +309,14 @@ static void ctl_event_hook(CPU *c)
     }
     if (logs++ < 60 && kind == 6)
         rt_log("[pcctl] click on %s\n", ps);
-    /* ours: not the ControlsMenu handler (it takes "btnRightArrow" & co. for its own selectors), only
-       the menus' common one it ends with (0x2589a0), as for any control */
     rt_call2(GT_FN_MENU_BASE_EVENT, self, ev);
     if (kind != 6 || !pl)
         return;
-    if (!strcmp(row, "PCDisplay")) {    /* DISPLAY_MENU */
+    if (!strcmp(row, "PCDisplay")) {
         display_menu_click(pl, ps);
         return;
     }
-    if (!strcmp(row, "PCKeysOpen")) {   /* KEY_MAP: the Keyboard / Gamepad page */
+    if (!strcmp(row, "PCKeysOpen")) {
         keymap_cancel();
         keys_page = 1;
         menu_layout(pl);
@@ -410,13 +354,13 @@ static void ctl_event_hook(CPU *c)
         cfg_save();
         rt_log("[pcctl] Auto Gas %s\n", v ? "on" : "off");
     } else if (!strcmp(row, "PCGear")) {
-        cfg.manual = !cfg.manual;       /* two values: either arrow steps to the other */
+        cfg.manual = !cfg.manual;
         keys_apply();
         cfg_save();
         set_text(pl, "PCGear.txtSelectorType", cfg.manual ? "Manual" : "Automatic");
         rt_log("[pcctl] Transmission %s\n", cfg.manual ? "manual" : "automatic");
     }
-    if (v >= 0) {                       /* the switch slides over, as the game's own do */
+    if (v >= 0) {
         u32 btn = rd32(ev);
         u32 slider = btn ? rt_call3(GT_FN_SWF_CHILD, pl, GA("SliderOnOff"), btn) : 0;
         if (slider)
@@ -428,8 +372,8 @@ static void ctl_event_hook(CPU *c)
 
 void pcctl_init(void)
 {
-    keymap_init();                      /* KEY_MAP: the keys work with or without the menu */
-    display_init();                     /* DISPLAY_MENU: Options' Display tile */
+    keymap_init();
+    display_init();
     const char *e = getenv("GT_PC_CONTROLS");
     on = !(e && *e == '0');
     if (!on) {
@@ -438,9 +382,6 @@ void pcctl_init(void)
     }
     cfg_load();
     if (cfg.touch < 0) {
-        /* no choice saved yet: the keyboard / gamepad mode on a PC; GT_TOUCH_SCREEN=1 starts with the touch
-           screen instead.  The save's own touch settings are recorded before the keys' replace them
-           (pcctl_frame), so Touch Screen On brings them back */
         const char *t = getenv("GT_TOUCH_SCREEN");
         cfg.touch = t && *t == '1';
         rt_log("[pcctl] no saved Touch Screen choice: %s by default\n", cfg.touch ? "on (GT_TOUCH_SCREEN=1)" : "off");
@@ -452,12 +393,6 @@ void pcctl_init(void)
            cfg.touch ? "the game's Controls settings" : cfg.manual ? "manual" : "automatic");
 }
 
-/* Camera Tilt with the keyboard / gamepad: Off unless the player turns it on (GT_CAMERA_TILT_DEFAULT=1: On).
-   The game's own default for a new profile is On (settings +0x70 = 1), and with the keys' tilt steering that
-   rolls the race camera with every turn.  The choice lives in pc_controls.txt and is written into the settings
-   once a start, when the main menu is up (the game has loaded its save by then; no race comes before it).  A
-   save that has no camera_tilt line yet gets the default once.  After that the byte is followed in the menus,
-   so the Camera Tilt row and the game's Game Settings > Camera horizon switch both change the saved choice. */
 static void camera_tilt_frame(u32 s)
 {
     static int applied;
@@ -481,23 +416,19 @@ static void camera_tilt_frame(u32 s)
         applied = 1;
         return;
     }
-    if ((*b != 0) != cfg.tilt) {        /* changed in a menu */
+    if ((*b != 0) != cfg.tilt) {
         cfg.tilt = *b != 0;
         rt_log("[pcctl] Camera Tilt %s: kept in pc_controls.txt\n", cfg.tilt ? "on" : "off");
         cfg_save();
     }
 }
 
-/* once a frame (steer_frame): the keyboard choices stay in force, also when the game loads its settings */
 void pcctl_frame(void)
 {
     if (on <= 0)
         return;
     u32 s = settings();
     if (!cfg.touch && cfg.touch_steer < 0) {
-        /* keyboard mode by default with no touch settings recorded yet: they are read once the main menu is up
-           (the game has loaded its settings by then; no race comes before it), and only then do the keys' own
-           replace them.  The choice is saved, so the next start has both. */
         const char *top = padmenu_top();
         if (!s || in_race() || !top || (strcmp(top, "MainMenu") && strcmp(top, "NavigationMenu")))
             return;
@@ -510,10 +441,10 @@ void pcctl_frame(void)
     }
     camera_tilt_frame(s);
     if (s && !in_race()) {
-        if (restore_after_race) {       /* Touch Screen went on during a race: the race is over now */
+        if (restore_after_race) {
             restore_after_race = 0;
             touch_restore(s);
-        } else if (cfg.touch) {         /* the player's own touch choices, as the menus leave them */
+        } else if (cfg.touch) {
             cfg.touch_steer = (int)rd32(s + SET_STEERING);
             cfg.touch_throttle = (int)rd32(s + SET_THROTTLE);
             cfg.touch_gearbox = (int)rd32(s + SET_GEARBOX);

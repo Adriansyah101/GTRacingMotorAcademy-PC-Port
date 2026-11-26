@@ -1,15 +1,14 @@
-/* plist.c -- property lists: binary (bplist00) and XML in, XML out.  Containers come back
-   mutable (host arrays and dictionaries); dates are NSDate, data NSData. */
 #include <ctype.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifndef _WIN32
+#include "compat.h"
+#endif
 
 #include "ns.h"
-
-/* binary */
 
 typedef struct {
     const u8 *p;
@@ -29,7 +28,6 @@ static u64 be(const u8 *p, u32 sz)
 
 static id bp_obj(BP *b, u32 ref);
 
-/* the count of an object whose marker's low nibble is 0xF: an int object follows */
 static int bp_count(BP *b, u32 *pos, u32 low, u32 *count)
 {
     if (low != 0xF) {
@@ -141,7 +139,6 @@ static id bp_parse_at(BP *b, u32 pos)
     }
 }
 
-/* objects are shared through the cache; the cache holds the only +1 (dropped at the end) */
 static id bp_obj(BP *b, u32 ref)
 {
     if (ref >= b->nobj || b->depth > 64)
@@ -175,8 +172,6 @@ static id parse_binary(const u8 *p, u32 n)
     return root;
 }
 
-/* XML */
-
 typedef struct { const char *p, *e; } XP;
 
 static void xp_skip(XP *x)
@@ -196,7 +191,6 @@ static void xp_skip(XP *x)
     }
 }
 
-/* reads a tag: name into tag, returns 1 open, 2 close, 3 empty (<x/>); 0 on error */
 static int xp_tag(XP *x, char *tag, size_t n)
 {
     xp_skip(x);
@@ -225,7 +219,6 @@ static int xp_tag(XP *x, char *tag, size_t n)
     return kind;
 }
 
-/* text up to the next '<', entities decoded */
 static void xp_text(XP *x, Buf *b)
 {
     while (x->p < x->e && *x->p != '<') {
@@ -417,8 +410,6 @@ id plist_read_file(const char *path)
         rt_log("[plist] %s: not a property list\n", path);
     return o;
 }
-
-/* XML out */
 
 static void xml_text(Buf *b, const char *s)
 {

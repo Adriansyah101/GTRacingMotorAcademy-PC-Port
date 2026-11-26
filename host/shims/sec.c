@@ -1,13 +1,7 @@
-/* sec.c -- the Security framework the game imports.
-
-   The keychain (SecItemAdd / CopyMatching / Update / Delete) is a list of item dictionaries kept in
-   home/Library/Keychains/keychain.plist: an item matches a query when every attribute the query names
-   (not its kSecReturn / kSecMatch / kSecValue keys) is equal.  Certificates, trust and RSA keys are only
-   used by the online parts: they fail (errSecParam) or give nothing. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "ns.h"
 
@@ -16,7 +10,7 @@
 #define errSecDuplicateItem ((u32)-25299)
 #define errSecItemNotFound ((u32)-25300)
 
-static id items;                   /* NSMutableArray of NSMutableDictionary */
+static id items;
 static char path[512];
 
 static void load(void)
@@ -66,7 +60,6 @@ static int flag(id query, const char *key)
     return v && ns_is_number(v) && ns_num_int(v);
 }
 
-/* query and attributes are host dictionaries or game NSDictionary objects: copy into a host one */
 static id host_dict(id d) { return d ? msg0(d, "mutableCopy") : ns_dict_new(); }
 
 u32 h_SecItemAdd(u32 attrs, u32 result)

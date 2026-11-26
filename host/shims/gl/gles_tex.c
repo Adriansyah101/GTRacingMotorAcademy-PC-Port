@@ -1,26 +1,17 @@
-/* gles_tex.c -- the game's textures on desktop OpenGL: the ES-only formats mapped, PVRTC unpacked.
-
-   - glTexImage2D / glRenderbufferStorage: GL_BGRA_EXT, GL_HALF_FLOAT_OES and GL_RGB565_OES as desktop names;
-   - glCompressedTexImage2D: PVRTC 1 (GL_IMG_texture_compression_pvrtc, 2 and 4 bits per pixel), which desktop
-     drivers do not have, unpacked to RGBA8 (PVRTC_FAST, optimisation pass 6: the same bytes, checked by --selftest);
-   - every level made goes to glenhance.c (glx_tex_level: anisotropic filtering).
-   Split from gles.c (the calls, the state, the vertex arrays and the shaders). */
 #include <emmintrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "gl.h"
 #include "gles_internal.h"
 #include "ui.h"
 
-/* formats */
-
 static u32 tex_internal(u32 internal, u32 format, u32 type)
 {
     (void)type;
-    if (internal == GL_BGRA)              /* GL_BGRA_EXT: desktop wants the components */
+    if (internal == GL_BGRA)
         return GL_RGBA;
     if (internal == GL_RGBA || internal == GL_RGB || internal == GL_ALPHA || internal == GL_LUMINANCE ||
         internal == GL_LUMINANCE_ALPHA)
@@ -39,20 +30,14 @@ void h_glTexImage2D(u32 target, u32 level, u32 internal, u32 w, u32 h, u32 borde
 
 void h_glRenderbufferStorage(u32 target, u32 internal, u32 w, u32 h)
 {
-    if (internal == GL_RGB565)              /* GL_RGB565_OES */
+    if (internal == GL_RGB565)
         internal = GL_RGB8;
     p_glRenderbufferStorage(target, internal, w, h);
 }
 
-/* PVRTC (GL_IMG_texture_compression_pvrtc)
-   The block layout and colour unpacking of Imagination's PVRTC 1 (as in the PowerVR SDK's
-   PVRTDecompress); the per-pixel loop is the Fast Five host's (pvrtc.c), whose output matched a
-   reference decoder byte for byte, with its copied quirk undone: colour B's 4-bit blue gets its last
-   bit (the Mac game's code set colour A's blue instead). */
-
 typedef struct {
     const u32 *blk[4];
-    int col[4][8];                       /* per block: colour A r g b a, colour B r g b a (5/4 bits) */
+    int col[4][8];
     u8 val[8 * 16], mode[8 * 16];
 } PvState;
 
@@ -81,7 +66,7 @@ static void pv_unpack(PvState *s, int b, const u32 *blk, int is2bit, int bw)
 {
     u32 d = blk[1], bits = blk[0], w = d & 0xfffe, hi = d >> 16, mode = d & 1;
     int *c = s->col[b];
-    if (!(d & 0x8000)) {                 /* colour A: ARGB 3443 */
+    if (!(d & 0x8000)) {
         c[0] = w >> 7 & 0x1e;
         c[1] = w >> 3 & 0x1e;
         c[0] = c[0] >> 4 | c[0];
@@ -89,18 +74,18 @@ static void pv_unpack(PvState *s, int b, const u32 *blk, int is2bit, int bw)
         c[2] = (int)(d & 0xe) * 2;
         c[2] = c[2] >> 3 | c[2];
         c[3] = w >> 11 & 0xe;
-    } else {                             /* RGB 554 */
+    } else {
         c[0] = w >> 10 & 0x1f;
         c[1] = w >> 5 & 0x1f;
         c[2] = (int)((d & 0x1e) >> 4 | (d & 0x1e));
         c[3] = 0xf;
     }
-    if (hi & 0x8000) {                   /* colour B: RGB 555 */
+    if (hi & 0x8000) {
         c[4] = d >> 26 & 0x1f;
         c[5] = d >> 21 & 0x1f;
         c[6] = hi & 0x1f;
         c[7] = 0xf;
-    } else {                             /* ARGB 3444 */
+    } else {
         int r = d >> 23 & 0x1e, g = d >> 19 & 0x1e;
         c[4] = r >> 4 | r;
         c[5] = g >> 4 | g;
@@ -134,7 +119,6 @@ static void pv_unpack(PvState *s, int b, const u32 *blk, int is2bit, int bw)
     }
 }
 
-/* rows y0 .. y1-1 of the picture (each row depends only on the data: PVRTC_FAST decodes bands of rows at once) */
 static void pv_decode_rows(const u8 *data, int is2bit, int w, int h, u8 *out, int y0, int y1)
 {
     const int bw = is2bit ? 8 : 4, full = bw;
@@ -202,16 +186,6 @@ static void pv_decode_rows(const u8 *data, int is2bit, int w, int h, u8 *out, in
 }
 static void pv_decode(const u8 *data, int is2bit, int w, int h, u8 *out) { pv_decode_rows(data, is2bit, w, h, out, 0, h); }
 
-/* PVRTC_FAST (optimisation pass 6; verified byte-exact by --selftest)
-   Why.  The PVRTC textures are unpacked to RGBA on the CPU (desktop GPUs have no PVRTC): ~180 textures, 13.4 million
-   pixels, 0.61 s of every race's loading on the loader thread (test save, France Raceway), on one core.  Not
-   a fault of the game or of the port.
-   What.  A picture of 64 K pixels or more is cut into bands of rows, decoded at once by the Windows thread pool and
-   the calling thread (each band by pv_decode_rows, the same code: the bytes are the same; --selftest decodes random
-   pictures both ways and compares them byte for byte).  At most 6 helpers and one fewer than the CPU's cores, so
-   the render thread keeps a core.  Two threads decoding at once each use the pool; a pool that cannot take work
-   leaves the calling thread to decode alone.
-   GT_PVRTC_FAST=0: one thread. */
 static int pvf_on = -1, pvf_threads;
 static int pvf_enabled(void)
 {
@@ -249,14 +223,14 @@ static void CALLBACK pv_worker(PTP_CALLBACK_INSTANCE inst, void *arg)
     (void)inst;
     PvJob *j = arg;
     pv_bands(j);
-    if (!InterlockedDecrement(&j->refs))  /* the last one out: the caller may go on (it does not touch j after) */
+    if (!InterlockedDecrement(&j->refs))
         SetEvent(j->done);
 }
 static void pv_decode_fast(const u8 *data, int is2bit, int w, int h, u8 *out, int threads)
 {
     PvJob j;
     j.data = data, j.out = out, j.is2bit = is2bit, j.w = w, j.h = h;
-    j.band = 16;                         /* rows a band: four block rows */
+    j.band = 16;
     j.nbands = (h + j.band - 1) / j.band;
     j.next = 0;
     if (threads > j.nbands - 1)
@@ -276,7 +250,7 @@ static void pv_decode_fast(const u8 *data, int is2bit, int w, int h, u8 *out, in
     if (j.done)
         CloseHandle(j.done);
 }
-static struct { u32 n; double px, us; } pv_st;   /* GT_GL_STATS: pictures, pixels, time decoding */
+static struct { u32 n; double px, us; } pv_st;
 static void pv_decode_any(const u8 *data, int is2bit, int w, int h, u8 *out)
 {
     LARGE_INTEGER f, t0, t1;
@@ -290,7 +264,6 @@ static void pv_decode_any(const u8 *data, int is2bit, int w, int h, u8 *out)
     pv_st.n++, pv_st.px += (double)w * h, pv_st.us += (double)(t1.QuadPart - t0.QuadPart) * 1e6 / (double)f.QuadPart;
 }
 
-/* GT_GL_STATS: the PVRTC pictures unpacked since the last line (loading) */
 void gles_pvrtc_stats(void)
 {
     if (pv_st.n)
@@ -299,8 +272,6 @@ void gles_pvrtc_stats(void)
     memset(&pv_st, 0, sizeof pv_st);
 }
 
-/* --selftest: random PVRTC pictures (4 and 2 bits a pixel, square, wide, tall, the smallest) decoded by one thread
-   and by bands on the pool, the bytes compared; the number of pictures that differ */
 int gles_selftest_pvrtc(void)
 {
     static const int sz[][2] = {{8, 8}, {16, 8}, {32, 32}, {64, 32}, {32, 128}, {256, 256}, {512, 128}, {1024, 512}};
@@ -331,7 +302,6 @@ void h_glCompressedTexImage2D(u32 target, u32 level, u32 internal, u32 w, u32 h,
 {
     if (internal >= GL_COMPRESSED_RGB_PVRTC_4BPPV1_IMG && internal <= GL_COMPRESSED_RGBA_PVRTC_2BPPV1_IMG) {
         int is2bit = internal & 1;
-        /* PVRTC pictures are at least 2 x 2 blocks: unpack that much, upload the corner */
         int pw = (int)w, ph = (int)h, minw = is2bit ? 16 : 8;
         if (pw < minw)
             pw = minw;

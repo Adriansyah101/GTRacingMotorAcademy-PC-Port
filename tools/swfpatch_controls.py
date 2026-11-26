@@ -1,34 +1,7 @@
-"""swfpatch_controls.py <menu.FAK> <out.FAK> -- PC_CONTROLS: the Controls menu's extra rows.
-
-The game's menu SWFs (uncompressed FWS .FAK files: the main menus MZlN_MiNH_XiZE*KXiiMlHM*.FAK and the
-in-race menus LHBMiNHF*KXiiMlHM*.FAK, SD / HD / _EdAXiF variants) each hold a ControlsMenu.  This adds,
-inside it, copies of the game's own option widgets, so the new rows look and fade like the rest:
-
-    PCTouch      "Touch Screen" + On/Off switch, one line under the panel (a new sprite: the title text
-                 left of the switch, so it fits under both the Presets and the Edit panel)
-    PCTilt       "Camera Tilt"  On/Off   (Game Settings > Camera's row: title + switch, "OnOffHorizon")
-    PCGas        "Auto Gas"     On/Off   (the same row)
-    PCGearTitle  "Transmission" title    ("txtSelectorsTitle")
-    PCGear       Manual / Automatic      (the < value > selector, "Selector2")
-    PCKeysOpen   "Keyboard / Gamepad" button, under them (KEY_MAP)
-    PCKeys       the Keyboard / Gamepad page: Head1..3 column heads, Title1..9 the actions, Cell<row><col>
-                 a key (col 1, 2) or the pad's input (col 3), CellDefault, CellBack; each cell has txtKey,
-                 Hi (shown while it waits for a key) and btnKey (the click)
-    PCDisplay    the Display page (DISPLAY_MENU): Title1..7 over Sel1..7 (< value >), Note,
-                 CellRestart
-
-Everything is found by name, not by character id (the files number their characters differently):
-the three keyboard rows sit where Game Settings > Camera (DriveAidsMenu.AllTabs.CameraChange) shows its
-two switches and its selector, the same layout, raised 60 px to the middle of the Controls panel.  The
-touch row is centred 714 px down a 1024 x 768 stage, under the Edit panel (which ends at 680).  The
-rows take 5 free depths right above the menu's buttons (under its popups) and every alpha step the
-'Hide' / 'Show' frames give AllTabs.  host/games/gtracing/features/pcctl.c sets their texts, states and which rows show, and
-takes their clicks.  The names are new (PC...), so the game's own lookups ("OnOffHorizon...",
-"Selector2...") still find Game Settings' widgets."""
 import struct
 import sys
 
-PX = 20                                   # twips per pixel
+PX = 20
 
 
 def hdr(d, i):
@@ -42,7 +15,6 @@ def hdr(d, i):
 
 
 def tags(d, i, end):
-    """[(code, body, raw bytes)]: unchanged tags are written back as they were"""
     out = []
     while i < end:
         code, ln, b = hdr(d, i)
@@ -101,7 +73,6 @@ def matrix_tx(d, k):
 
 
 def placement(code, b):
-    """(flags, depth, char or None, (tx, ty) or None, name or None)"""
     f = b[0]
     k = 2 if code == 70 else 1
     depth = struct.unpack_from('<H', b, k)[0]
@@ -156,7 +127,6 @@ def bits(*vals):
 
 
 def matrix_s(sx, sy, tx, ty):
-    """a matrix: scale (floats) and translation (twips)"""
     w = BW()
     fx, fy = int(round(sx * 65536)), int(round(sy * 65536))
     if (fx, fy) != (65536, 65536):
@@ -181,7 +151,6 @@ def place_s(depth, cid, sx, sy, tx, ty, name=None):
 
 
 def place_matrix(code, b):
-    """(sx, sy, tx, ty) of a placement (scale 1 when it has none)"""
     k = 2 if code == 70 else 1
     k += 2
     if b[0] & 2:
@@ -200,8 +169,6 @@ def place_matrix(code, b):
 
 
 def rect_shape(sid, w, h, fill, line, lw):
-    """DefineShape3: a w x h (twips) rectangle centred on 0,0, filled with fill (RGBA) and edged with line
-    (RGBA, lw twips wide)"""
     hw, hh, m = w // 2, h // 2, lw // 2
     b = BW()
     n = bits(hw + m, hh + m)
@@ -211,29 +178,29 @@ def rect_shape(sid, w, h, fill, line, lw):
     body = struct.pack('<H', sid) + b.done() + bytes([1, 0]) + bytes(fill) + bytes([1]) + \
         struct.pack('<H', lw) + bytes(line)
     r = BW()
-    r.u(1, 4)                                 # fill bits
-    r.u(1, 4)                                 # line bits
-    for f in (0, 0, 1, 1, 0, 1):              # style change: line, fill 1, move to the top left
+    r.u(1, 4)
+    r.u(1, 4)
+    for f in (0, 0, 1, 1, 0, 1):
         r.u(f, 1)
     n = bits(hw, hh)
     r.u(n, 5)
     r.u(-hw & ((1 << n) - 1), n)
     r.u(-hh & ((1 << n) - 1), n)
-    r.u(1, 1)                                 # fill 1 = 1 (inside, drawn clockwise)
-    r.u(1, 1)                                 # line = 1
+    r.u(1, 1)
+    r.u(1, 1)
     for dx, dy in ((2 * hw, 0), (0, 2 * hh), (-2 * hw, 0), (0, -2 * hh)):
         r.u(1, 1)
-        r.u(1, 1)                             # edge, straight
+        r.u(1, 1)
         n = bits(dx, dy)
         r.u(n - 2, 4)
-        r.u(0, 1)                             # vertical or horizontal
+        r.u(0, 1)
         if dx:
             r.u(0, 1)
             r.u(dx & ((1 << n) - 1), n)
         else:
             r.u(1, 1)
             r.u(dy & ((1 << n) - 1), n)
-    r.u(0, 6)                                 # end
+    r.u(0, 6)
     return tag(32, body + r.done())
 
 
@@ -260,11 +227,10 @@ class Swf:
                 cid = struct.unpack_from('<H', b)[0]
                 r = BR(b, 2)
                 n = r.u(5)
-                box = [r.sg(n) for _ in range(4)]                   # xmin xmax ymin ymax
+                box = [r.sg(n) for _ in range(4)]
                 (self.texts if c == 37 else self.shapes)[cid] = box
 
     def places(self, cid=None):
-        """the placements of a sprite (or the root), [(frame, flags, depth, char, t, name, code, body)]"""
         src = tags(self.sprites[cid], 4, len(self.sprites[cid])) if cid else self.top
         out, frame = [], 0
         for c, b, _ in src:
@@ -275,7 +241,6 @@ class Swf:
         return out
 
     def child(self, cid, name):
-        """(char, [every translation it gets]) of the child placed as name"""
         ps = self.places(cid)
         for p in ps:
             if p[5] == name:
@@ -285,9 +250,6 @@ class Swf:
 
 
 def bounds(s, cid, depth=0):
-    """a character's drawn box in its own space (twips: xmin xmax ymin ymax): shapes and texts as declared,
-    sprites from their first frame's children (scale and translation only; a mirrored child, negative
-    scale, included: the main menus' left arrow is one), leaving out the buttons' invisible 'hitzone's"""
     if cid in s.shapes:
         return s.shapes[cid]
     if cid in s.texts:
@@ -316,7 +278,7 @@ def main():
     tabs, tabs_ts = s.child(dam, 'AllTabs')
     ctl_t, dam_t, tabs_t = ctl_ts[0], dam_ts[0], tabs_ts[0]
     cam, cam_ts = s.child(tabs, 'CameraChange')
-    cam_t = min(cam_ts, key=lambda t: abs(t[0]))          # the frame where the Camera tab shows it
+    cam_t = min(cam_ts, key=lambda t: abs(t[0]))
     row, row_ts = s.child(cam, 'OnOffHorizon')
     _, row2_ts = s.child(cam, 'OnOffScreen')
     sel, sel_ts = s.child(cam, 'Selector2')
@@ -324,15 +286,12 @@ def main():
     title, title_ts = s.child(row, 'txtTitle')
     switch, switch_ts = s.child(row, 'btnOnOff')
 
-    # the camera rows' origin in ControlsMenu's space, raised 60 px
     bx = dam_t[0] + tabs_t[0] + cam_t[0] - ctl_t[0]
     by = dam_t[1] + tabs_t[1] + cam_t[1] - ctl_t[1] - 60 * PX
 
-    # the touch row: title box centre, and the switch's centre 54 px under the title, centred on it
-    # (as the original row draws them)
     xmin, xmax, ymin, ymax = s.texts[title]
     tcx, tcy = (xmin + xmax) // 2, (ymin + ymax) // 2
-    scx = title_ts[0][0] + tcx - switch_ts[0][0]           # the switch's centre from its origin
+    scx = title_ts[0][0] + tcx - switch_ts[0][0]
     scy = title_ts[0][1] + tcy + 54 * PX - switch_ts[0][1]
     stage_w = s.stage[1] - s.stage[0]
     cx, cy = stage_w // 2, 714 * PX
@@ -349,13 +308,6 @@ def main():
         place(2, switch, left + text_w + gap + switch_w // 2 - scx - ctl_t[0], cy - scy - ctl_t[1],
               'btnOnOff') + tag(1, b'') + tag(0, b'')
 
-    # KEY_MAP: the Keyboard / Gamepad page (host/games/gtracing/features/pcctl.c draws nothing, it sets texts and takes
-    # the clicks; host/games/gtracing/features/keymap.c keeps the keys).  A cell is a 1-frame sprite: a dark bar, a yellow frame
-    # (Hi, shown while it waits for a key), a text (the selector's txtSelectorType, scaled) and on top an
-    # invisible button, the selector arrow's sprite (its Idle / FocusIn / Clicked frames and click
-    # sound) with its arrow picture swapped for an empty sprite and its hitzone stretched over the bar.
-    # The text sits under the button (gameswf gives a touch to the topmost thing hit, a text field too)
-    # and outside it (the button's timeline goes back to earlier frames, which could recreate it).
     defs = []
     nid = [row_id]
 
@@ -368,10 +320,9 @@ def main():
     hz_place = next(p for p in s.places(hz) if p[3] is not None)
     hsx, hsy, htx, hty = place_matrix(hz_place[6], hz_place[7])
     sx0, sx1, sy0, sy1 = s.shapes[hz_place[3]]
-    hbox = (hsx * sx0 + htx, hsx * sx1 + htx, hsy * sy0 + hty, hsy * sy1 + hty)   # in the hitzone's space
+    hbox = (hsx * sx0 + htx, hsx * sx1 + htx, hsy * sy0 + hty, hsy * sy1 + hty)
     txt_sel, _ = s.child(sel, 'txtSelectorType')
     txt_head, _ = s.child(selt, 'typefield')
-    # the selector's text against its bar, so the cells' texts sit as high in theirs
     bar_sel = next(p for p in s.places(sel) if p[3] is not None and p[5] is None)
     sel_txt_t = next(p[4] for p in s.places(sel) if p[5] == 'txtSelectorType')
     bx0, bx1, by0, by1 = s.shapes[bar_sel[3]]
@@ -382,7 +333,6 @@ def main():
     defs.append(sprite(empty))
 
     def button(w, h):
-        """the arrow button's sprite: no arrow, the hitzone over w x h (twips) centred on 0,0"""
         bid = new_id()
         sid_, frames = struct.unpack_from('<HH', s.sprites[arrow])
         body, frame = [], 0
@@ -407,7 +357,6 @@ def main():
         return bid
 
     def cell(w, h, k):
-        """a cell w x h (px), its text at scale k: Hi, txtKey, btnKey"""
         w, h = w * PX, h * PX
         bar, hi_shape, hi, cid = new_id(), new_id(), new_id(), None
         defs.append(rect_shape(bar, w, h, (44, 44, 44, 255), (96, 96, 96, 255), 2 * PX))
@@ -421,8 +370,6 @@ def main():
         return cid
 
     small, large = cell(180, 34, 0.72), cell(300, 40, 0.8)
-    # the page: column heads, the nine actions' names, a cell per key (two keys and the pad), Default
-    # and Back; in ControlsMenu's space (the stage, 1024 x 768), inside the panel (66 .. 954, 123 .. 596)
     cols, title_x, row_y, pitch, head_y = (420, 615, 820), 205, 192, 40, 152
     page = []
     hx0, hx1, hy0, hy1 = s.texts[txt_head]
@@ -444,23 +391,6 @@ def main():
     keys_page = new_id()
     defs.append(sprite(keys_page, *page))
 
-    # DISPLAY_MENU: Options' Display tile (swfpatch_display.py) opens this menu with only
-    # the PCDisplay page showing (host/games/gtracing/features/display.c, pcctl.c): rows like Transmission (a title over a
-    # < value > selector: Title1..7, Sel1..7), a note line (Note) and a button (CellRestart).  The rows
-    # are laid out in the Controls panel (the first child of ControlsMenu.AllTabs).
-    # The page looks alike in the main menus and in a race.  An earlier layout kept the Camera tab's places (a
-    # port fault): the in-race
-    # file's selector is smaller (599 px wide against 748) and its panel lower (164 .. 666 against
-    # 121 .. 598), so in a race the rows were narrower and the first title stood above the panel.  Now
-    # every file's selector is scaled to SEL_W px wide (its bar then about 48 px high in both), each
-    # title sits just over its selector, and the rows, ROW_PITCH apart, are centred in the file's own
-    # panel; the note and the Restart button share the line under them (display.c shows one at a time).
-    # Six rows (Full Screen, then Motion Blur for GPU_PROFILE): the rows 70 px apart, the selectors 610 px
-    # wide so a title clears the bar above it, and the note under the sixth.
-    # Seven rows (PostFX, POSTFX): the six rows' layout scaled by FIT (titles, selectors, the pitch and the gaps),
-    # so the seven take the height six took and keep the same clearances.
-    # The content's height: from the first title's top (TITLE_UP + 12 over the first selector) to the note's
-    # bottom (20 under its centre): 5 * 70 + 44 + 69 = 463 px with six rows, 533 unscaled with seven.
     NROWS = 7
     FIT = (5 * 70 + 44 + 20 + 37 + 12) / ((NROWS - 1) * 70 + 44 + 20 + 37 + 12)
     SEL_W, ROW_PITCH, TITLE_UP, TITLE_TOP, NOTE_BOTTOM = 610 * FIT, 70 * FIT, 37 * FIT, 12 * FIT, 20 * FIT
@@ -469,16 +399,16 @@ def main():
     pp = next(p for p in s.places(ctabs) if p[0] == 0 and p[2] == 1 and p[3] is not None)
     pb = bounds(s, pp[3])
     psx, psy, ptx, pty = place_matrix(pp[6], pp[7])
-    pcx = (psx * (pb[0] + pb[1]) / 2 + ptx + ctabs_ts[0][0])          # the panel's centre, ControlsMenu space
+    pcx = (psx * (pb[0] + pb[1]) / 2 + ptx + ctabs_ts[0][0])
     pcy = (psy * (pb[2] + pb[3]) / 2 + pty + ctabs_ts[0][1])
     sb = bounds(s, sel)
     k = SEL_W * PX / (sb[1] - sb[0])
     bar_t = bar_sel[4] or (0, 0)
-    scx, scy = (sb[0] + sb[1]) / 2, bar_t[1] + (by0 + by1) / 2          # the selector's middle, its own space
+    scx, scy = (sb[0] + sb[1]) / 2, bar_t[1] + (by0 + by1) / 2
     tf, tf_ts = s.child(selt, 'typefield')
     tb = s.texts[tf]
     tcx, tcy = tf_ts[0][0] + (tb[0] + tb[1]) / 2, tf_ts[0][1] + (tb[2] + tb[3]) / 2
-    c1 = pcy - (NOTE_DOWN + NOTE_BOTTOM - TITLE_UP - TITLE_TOP) / 2 * PX    # the content centred in the panel
+    c1 = pcy - (NOTE_DOWN + NOTE_BOTTOM - TITLE_UP - TITLE_TOP) / 2 * PX
     disp = []
     for i in range(NROWS):
         c = c1 + i * ROW_PITCH * PX
@@ -494,7 +424,6 @@ def main():
     disp_page = new_id()
     defs.append(sprite(disp_page, *disp))
 
-    # 8 free depths right above the menu's buttons
     ps = s.places(ctl)
     used = {p[2] for p in ps}
     named = {p[5]: p[2] for p in ps if p[5]}
@@ -517,18 +446,18 @@ def main():
             sid, frames = struct.unpack_from('<HH', body)
             new, first = [], True
             for c, b, r in tags(body, 4, len(body)):
-                if c == 1 and first:                  # end of frame 1: our rows
+                if c == 1 and first:
                     first = False
                     new += [place(*o) for o in ours]
                 new.append(r)
                 if c in (26, 70):
                     f, depth, cid, t, name = placement(c, b)
                     if depth == alltabs and f & 8 and not f & 2:
-                        for o in ours:                 # the same fade as AllTabs
+                        for o in ours:
                             bb = bytearray(b)
                             struct.pack_into('<H', bb, 2 if c == 70 else 1, o[0])
                             new.append(tag(c, bytes(bb)))
-            out.append(tag(39, touch))                 # defined before their user
+            out.append(tag(39, touch))
             out += defs
             out.append(tag(39, struct.pack('<HH', sid, frames) + b''.join(new)))
         else:

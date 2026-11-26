@@ -1,8 +1,4 @@
-﻿"""Print disassembly around an address in the mode of the function containing it.
-
-Usage: python -I disasm.py <executable> <addr> [count=40] [before_bytes=0] [arm|thumb]
-"""
-import bisect
+﻿import bisect
 import os
 import sys
 

@@ -1,67 +1,12 @@
-/* board.c -- RED_BULL_BOARD (port addition): the Red Bull menu's leaderboard kept offline, without Gameloft LIVE's
-   sign-in: the player's name and best time, plus the times of the friends met in Local / Bluetooth / Online
-   multiplayer.
-
-   The original: the Red Bull page's Leaderboard tile (NavigationMenu.AllTabs.btnLeaderboard, its action
-   OnClicked_btnLeaderboard) opens Gameloft LIVE's login (GLLiveLoginMenu); after a login, RedBullLeaderboardsMenu
-   (vtable 0x7862f8) asked Gameloft's server for leaderboard 15 (its update 0x1bf5d4 is a state machine at
-   [menu+0x630]: 0 connect, 1 idle, 2..5 send the times, 6 ask the top 10, 7 ask "my rank", 8 / 9 show the answer;
-   [menu+0x634] is the tab, 1 My Rank, 0 Top 10).  The server is gone, so the leaderboard could never show.
-
-   The time itself is the game's own: when the first lap of the Red Bull Time Trial ends (the racer's lap code
-   0x195548, the Red Bull test 0x376da4), the game keeps the best lap as record 15 of its time records
-   (0x2666b4 -> 0x2b1790: owner [[0x70c040]] + 4 -> +0xc0 = {count, records of 0x164 bytes}; a record starts with
-   its board number, group 0 slot 0 holds state, best time in ms, car) and saves it with the game.
-
-   Here:
-     - the tile's login goes to RedBullLeaderboardsMenu instead (menu3d.c's hook on the menu push, within 3 s of
-       the tile's release); after a Red Bull race (0x376e68, below) the menus come back as after any race (the
-       Red Bull event's page) with the leaderboard pushed over it; the menu's update
-       keeps its state machine idle (no server), its "Connection Lost" popups are left out (0x212170 wrapped,
-       slot +0x78, the online request's listener at slot +0x0c: a test showed one), and the rows are filled
-       here: rank, name, car, time (the game's own "MM:SS.mmm" with the small milliseconds), the player's own row
-       in the game's orange, best first; Top 10 shows the first ten, My Rank the ten around the player.
-     - the board is kept in <home>/Library/Preferences/redbull_board.txt: an id made once for this PC's player
-       ("me <id>") and one line per player: id, best time (ms), car, name.  The player's own line follows the
-       game's record 15 (the better of the two) and the name the player goes by (PLAYER_NAME, p2p.c).
-     - in a multiplayer game (Local, Bluetooth, Online), every player the game talks to gets our board (the own
-       line first, then the best 23 others) three times (at once, 2 s and 7 s later; again after a minute without
-       that player): Local and Bluetooth as one UDP datagram to the player's address, port 28197 (net.c sees the
-       addresses the game sends to, gk.c its connections), Online as a tunnel frame of kind 3 (net.c).  A board
-       that comes in is merged: new players are added, a better time replaces a worse one, a player's name comes
-       from that player's own line only; ours is never taken from someone else.
-   GT_RED_BULL_BOARD=0: the original (the tile opens the login).  GT_RED_BULL_BOARD_FAKE=ms[:car] (testing): at
-   the first leaderboard, the game's own record call is made with that lap time.  GT_RED_BULL_BOARD_TEST_END=frame
-   (testing): the race's Leaderboard button's call on that frame (board_tick).
-
-   CLOUD_BOARD (port addition): the same board shared through a small self-hosted server (Cloudflare Workers + D1,
-   reached with WinHTTP), cloud/redbull-board/ (worker.js, schema.sql; not part of the release folder).
-     - GT_CLOUD_BOARD=1 (default) with GT_CLOUD_BOARD_URL (default: the project's server, main.c
-       default_settings; another https:// address picks another server): the leaderboard menu's opening asks
-       GET <url>/board (at most once a minute) and the own best goes to POST <url>/submit when it is faster than
-       the last one the server took (redbull_cloud.txt next to the board: "sent <ms>"; so a lap of before this
-       feature goes once too, then only a new better record 15).  No URL, GT_CLOUD_BOARD=0, no answer, HTTP 429
-       (the server's quota) or any other error: the board stays this PC's and the friends' only.
-     - WinHTTP (Windows' own, no DLL in the folder) on a thread of its own, 4 s timeouts: the render thread only
-       starts the thread and later draws what it merged (under the board's lock).  The guest's own network (its
-       NSURLConnection, getaddrinfo) stays shut.
-     - What goes out: {"player_id","name","car","time_ms"}, the "me <id>" random number, the name the player goes
-       by, 411 and the lap.  Nothing of Windows (user, PC, folders); the URL is not written to the log (main.c
-       hides an ini value whose key ends in _URL).
-     - The server never shows a player_id: its rows carry alias(id) = 10 hex digits of SHA-256("gtlb1:" + id).
-       A player only known from the server is kept under that alias (the id column, same format); met in
-       multiplayer later, the line takes the player's own id.  Our own row is never taken from the server, nor
-       from anyone else (by id or by alias).
-   Names (players called the same, and the many "iPad"s, the name a
-   player has without PLAYER_NAME): the row shows "name#A1B2" when the name is "iPad" (any case) or another
-   player on the board has the same name (any case, as far as the column shows it).  The tag is the first 4
-   digits of the alias in capitals: the same on every PC whether the player came by multiplayer or the cloud, and
-   not a piece of the id itself.  At most 16 characters (PLAYER_NAME's own limit; more runs into the car column):
-   the name is cut to 11 for a tag.  The own row: orange, and " (You)" when it still fits. */
 #define _CRT_RAND_S
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <winhttp.h>
+#else
+#include <dlfcn.h>
+#include "compat_net.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -72,7 +17,7 @@
 #include "net.h"
 #include "ns.h"
 
-#define RB_VTBL 0x7862f8u                  /* RedBullLeaderboardsMenu */
+#define RB_VTBL 0x7862f8u
 #define RB_UPDATE_SLOT (RB_VTBL + 0x1c)
 #define RB_UPDATE_FN 0x1bf5d4u
 #define RB_ENTER_SLOT (RB_VTBL + 0x0c)
@@ -80,18 +25,18 @@
 #define RB_ERROR_SLOT (RB_VTBL + 0x78)
 #define RB_ERROR_FN 0x1bd79cu
 #define RB_STATE 0x630
-#define RB_TAB 0x634                       /* 1 My Rank, 0 Top 10 */
-#define RB_FLAGS 0x638                     /* 4 request bytes */
+#define RB_TAB 0x634
+#define RB_FLAGS 0x638
 #define RB_TIMEOUT 0x644
-#define RB_ONLINE 0x5c                     /* byte: the update reports NET_ERROR (slot +0x78, the error popup) */
+#define RB_ONLINE 0x5c
 #define NET_ERROR 0x7a2c50u
 #define MENU "RedBullLeaderboardsMenu"
 #define BOARD_NO 15
 #define RECORD_SIZE 0x164
-#define FN_RECORD_ADD 0x2666b4u            /* (owner, board, group, slot, [sp] entry of 0x2c bytes) */
-#define ENTRY_PATTERN 0x6de510u            /* the lap code's filler for the entry's last 0x20 bytes */
-#define RB_CAR 411                         /* the Red Bull Time Trial's car (F1 RB8) */
-#define FN_CAR_NAME 0x2b6c28u              /* (cars, index, char buf, 0) */
+#define FN_RECORD_ADD 0x2666b4u
+#define ENTRY_PATTERN 0x6de510u
+#define RB_CAR 411
+#define FN_CAR_NAME 0x2b6c28u
 
 #define LB_PORT 28197
 #define MAX_ENTRIES 200
@@ -99,11 +44,10 @@
 #define NAME_LEN 24
 #define MAX_PEERS 16
 
-#define ALIAS_LEN 10                       /* the server's name for an id (CLOUD_BOARD) */
-#define SHOW_LEN 16                        /* a row's name column: PLAYER_NAME's limit */
+#define ALIAS_LEN 10
+#define SHOW_LEN 16
 #define TAG_LEN 4
 
-/* alias: the id's SHA-256 alias, or the id itself when it is one (a player only known from the server) */
 typedef struct { char id[12]; int ms, car; char name[NAME_LEN]; char alias[12]; } Entry;
 typedef struct { int used, tun; u32 ip; DWORD seen, next; int sent; } Peer;
 
@@ -111,7 +55,7 @@ static int on = -1;
 static CRITICAL_SECTION lock;
 static volatile LONG lock_ready;
 static Entry board[MAX_ENTRIES];
-static int n_board, loaded, no_save;       /* no_save: the selftest's made-up boards */
+static int n_board, loaded, no_save;
 static char my_id[12], my_alias[12];
 static volatile LONG generation;
 static Peer peers[MAX_PEERS];
@@ -131,9 +75,6 @@ static void lock_init(void)
         Sleep(0);
 }
 
-/* the server's alias of an id (SHA-256: crypto.c) */
-
-/* worker.js alias(): the first 10 hex digits of SHA-256("gtlb1:" + id); an alias is its own */
 static void alias_of(const char *id, char out[12])
 {
     if (strlen(id) == ALIAS_LEN) {
@@ -148,8 +89,6 @@ static void alias_of(const char *id, char out[12])
         snprintf(out + 2 * i, 3, "%02x", d[i]);
 }
 
-/* the file */
-
 static const char *board_path(char *buf, size_t n)
 {
     char g[512];
@@ -157,7 +96,6 @@ static const char *board_path(char *buf, size_t n)
     return gt_host_path(g, buf, n);
 }
 
-/* CLOUD_BOARD: the own best the server has taken, "sent <ms>" (its own file: redbull_board.txt keeps its format) */
 static const char *cloud_state_path(char *buf, size_t n)
 {
     char g[512];
@@ -165,7 +103,6 @@ static const char *cloud_state_path(char *buf, size_t n)
     return gt_host_path(g, buf, n);
 }
 
-/* a file written whole or not at all: the cloud's thread may write it while the game is closed */
 static FILE *open_new(const char *path, char *tmp, size_t cap)
 {
     snprintf(tmp, cap, "%s.new", path);
@@ -223,8 +160,6 @@ static Entry *find(const char *id)
     return NULL;
 }
 
-/* a player by id or by the server's alias of it.  One known from the server alone (by the alias) who now comes
-   with the own id (multiplayer) is kept under that id from now on: one line per player either way. */
 static Entry *find_player(const char *id)
 {
     Entry *e = find(id);
@@ -241,13 +176,11 @@ static Entry *find_player(const char *id)
     return NULL;
 }
 
-/* the player's own line, by id or by alias: never given by anyone else */
 static int is_me(const char *id)
 {
     return !strcmp(id, my_id) || (my_alias[0] && !strcmp(id, my_alias));
 }
 
-/* a player's time (and name when given): 1 if the board changed */
 static int put(const char *id, int ms, int car, const char *name)
 {
     if (ms <= 0 || ms > 3600000 || !valid_id(id))
@@ -258,8 +191,6 @@ static int put(const char *id, int ms, int car, const char *name)
         if (n_board < MAX_ENTRIES)
             e = &board[n_board++];
         else {
-            /* the slowest other player's line (line 0 was once the first pick even when it was
-               the own one; the server's 200 rows can fill the board) */
             int worst = -1;
             for (int i = 0; i < n_board; i++)
                 if (strcmp(board[i].id, my_id) && (worst < 0 || board[i].ms > board[worst].ms))
@@ -323,8 +254,6 @@ static void board_load(void)
     rt_log("[board] Red Bull leaderboard: %d player(s), this PC's player is %s\n", n_board, my_id);
 }
 
-/* the player's own time: the game's record 15 */
-
 static int game_record(int *ms, int *car)
 {
     u32 g = rd32(GT_PROFILE_SLOT), owner = g ? rd32(g) : 0, o = owner ? rd32(owner + 4) : 0;
@@ -346,7 +275,6 @@ static int game_record(int *ms, int *car)
     return 0;
 }
 
-/* the own line from the game's record and the name in use (main thread: game memory) */
 static void own_sync(void)
 {
     int ms, car;
@@ -362,12 +290,10 @@ static void own_sync(void)
     if (changed) {
         board_save();
         InterlockedIncrement(&generation);
-        rt_log("[board] own best %d ms\n", find(my_id) ? find(my_id)->ms : 0);   /* no names in the log */
+        rt_log("[board] own best %d ms\n", find(my_id) ? find(my_id)->ms : 0);
     }
     LeaveCriticalSection(&lock);
 }
-
-/* to and from the other players */
 
 static int cmp_ms(const void *a, const void *b)
 {
@@ -375,7 +301,6 @@ static int cmp_ms(const void *a, const void *b)
     return x->ms != y->ms ? (x->ms < y->ms ? -1 : 1) : strcmp(x->id, y->id);
 }
 
-/* "GTLB1 <sender id>\n", then "id\tms\tcar\tname\n": the sender's own line first */
 static int payload(char *out, int cap)
 {
     int n = snprintf(out, cap, "GTLB1 %s\n", my_id);
@@ -415,10 +340,9 @@ static void merge(const char *p, u32 n, const char *from)
     while ((line = strtok_s(NULL, "\n", &ctx))) {
         char *c2 = NULL, *id = strtok_s(line, "\t", &c2), *ms = strtok_s(NULL, "\t", &c2),
              *car = strtok_s(NULL, "\t", &c2), *name = strtok_s(NULL, "", &c2);
-        if (!id || !ms || !car || is_me(id))      /* ours, also as the server's alias (a friend's cloud rows) */
+        if (!id || !ms || !car || is_me(id))
             continue;
         got++;
-        /* a name only from that player's own line; someone else's line gives a time (and a name if new) */
         int own = !strcmp(id, sender);
         Entry *e = find_player(id);
         changed += put(id, atoi(ms), atoi(car), own || !e ? (name ? name : "?") : NULL);
@@ -470,7 +394,7 @@ static void peer_seen(int tun, u32 ip)
             continue;
         }
         if (q->tun == tun && q->ip == ip) {
-            if (now - q->seen > 60000)         /* a new game with that player */
+            if (now - q->seen > 60000)
                 q->sent = 0, q->next = now;
             q->seen = now;
             LeaveCriticalSection(&lock);
@@ -490,11 +414,9 @@ static void peer_seen(int tun, u32 ip)
     LeaveCriticalSection(&lock);
 }
 
-/* net.c / gk.c: a player the game talks to (Local, Bluetooth), one through the tunnel (Online) */
 void board_peer_lan(u32 ip_be) { peer_seen(0, ip_be); }
 void board_peer_tun(int i) { peer_seen(1, (u32)i); }
 
-/* net.c: a tunnel frame of kind 3 (called under the tunnel's lock: sending waits for board_poll) */
 void board_rx_tun(int i, const u8 *p, u32 n)
 {
     if (on <= 0)
@@ -505,7 +427,6 @@ void board_rx_tun(int i, const u8 *p, u32 n)
     peer_seen(1, (u32)i);
 }
 
-/* from the game's network calls (net.c) and the Bluetooth pump (gk.c) */
 void board_poll(void)
 {
     if (on <= 0 || !net_lan_on())
@@ -535,7 +456,7 @@ void board_poll(void)
     for (int i = 0; i < MAX_PEERS; i++)
         if (peers[i].used && peers[i].sent < 3 && (int)(now - peers[i].next) >= 0 && now - synced > 1000) {
             synced = now;
-            own_sync();                         /* a lap of a minute ago goes too */
+            own_sync();
             break;
         }
     for (int i = 0; i < MAX_PEERS; i++) {
@@ -568,31 +489,36 @@ void board_poll(void)
     InterlockedExchange(&busy, 0);
 }
 
-/* CLOUD_BOARD: the server (cloud/redbull-board/worker.js) */
-
-#define CLOUD_MIN_MS 50000                 /* worker.js MIN_LAP_MS / MAX_LAP_MS: outside, never sent nor taken */
+#define CLOUD_MIN_MS 50000
 #define CLOUD_MAX_MS 600000
-#define CLOUD_GET_EVERY 60000              /* the menu's opening asks at most once a minute */
-#define CLOUD_RETRY 60000                  /* no answer: the next try a minute on */
-#define CLOUD_QUOTA_WAIT 600000            /* HTTP 429 / 503 (the server's quota): ten minutes on */
-#define CLOUD_TIMEOUT 4000                 /* each of WinHTTP's steps: name, connection, send, answer */
+#define CLOUD_GET_EVERY 60000
+#define CLOUD_RETRY 60000
+#define CLOUD_QUOTA_WAIT 600000
+#define CLOUD_TIMEOUT 4000
 #define CLOUD_REPLY_MAX (256 * 1024)
 
+#ifdef _WIN32
+#define HTTP_LIB "WinHTTP"
 typedef struct { wchar_t host[256], base[512]; INTERNET_PORT port; int secure; } CloudUrl;
+#else
+#define HTTP_LIB "curl"
+typedef void *HINTERNET;
+typedef struct { char base[512]; int secure; } CloudUrl;
+#endif
 typedef struct { int get, post_ms; char body[256]; } CloudJob;
 
 static int cl_on;
 static CloudUrl cl_url;
-static volatile LONG cl_busy;              /* a request thread is out: no second one */
+static volatile LONG cl_busy;
 static volatile LONG cl_waiting;
 static volatile DWORD cl_wait_until;
 static DWORD cl_last_get;
 static int cl_got_once;
-static int cl_sent_ms, cl_refused_ms, cl_state_loaded;   /* under the lock */
-static volatile LONG cl_said;              /* the last failure logged (each once until a success) */
-static DWORD cl_err;                       /* WinHTTP's error of the last request with no answer */
+static int cl_sent_ms, cl_refused_ms, cl_state_loaded;
+static volatile LONG cl_said;
+static DWORD cl_err;
 
-/* https://host[:port][/path], or plain http to this PC (the local test server); no user, query or fragment */
+#ifdef _WIN32
 static int cloud_crack(const char *u, CloudUrl *o)
 {
     wchar_t w[768];
@@ -624,9 +550,103 @@ static int cloud_crack(const char *u, CloudUrl *o)
         o->base[--n] = 0;
     return 1;
 }
+#else
+static int cloud_crack(const char *u, CloudUrl *o)
+{
+    memset(o, 0, sizeof *o);
+    if (!u || !*u || strlen(u) >= 500)
+        return 0;
+    const char *h;
+    if (!strncasecmp(u, "https://", 8))
+        o->secure = 1, h = u + 8;
+    else if (!strncasecmp(u, "http://", 7))
+        h = u + 7;
+    else
+        return 0;
+    size_t hl = strcspn(h, "/?#");
+    if (!hl || hl >= 256 || memchr(h, '@', hl) || strpbrk(h + hl, "?#"))
+        return 0;
+    char host[256];
+    memcpy(host, h, hl);
+    host[hl] = 0;
+    char *end = host[0] == '[' ? strchr(host, ']') : strchr(host, ':');
+    if (host[0] == '[' && end)
+        end[1] = 0;
+    else if (end)
+        *end = 0;
+    int here = !strcmp(host, "127.0.0.1") || !strcasecmp(host, "localhost") || !strcmp(host, "[::1]");
+    if (!o->secure && !here)
+        return 0;
+    size_t n = strlen(u);
+    memcpy(o->base, u, n + 1);
+    while (n && o->base[n - 1] == '/')
+        o->base[--n] = 0;
+    return 1;
+}
 
-/* JSON: just what worker.js answers, {"v":1,"rows":[{"id","name","car","time_ms"}, ...]}; anything else is
-   skipped or makes the answer no board -- */
+#define CURLOPT_WRITEDATA 10001
+#define CURLOPT_URL 10002
+#define CURLOPT_POSTFIELDS 10015
+#define CURLOPT_USERAGENT 10018
+#define CURLOPT_HTTPHEADER 10023
+#define CURLOPT_WRITEFUNCTION 20011
+#define CURLOPT_SSLVERSION 32
+#define CURLOPT_FOLLOWLOCATION 52
+#define CURLOPT_POSTFIELDSIZE 60
+#define CURLOPT_NOSIGNAL 99
+#define CURLOPT_TIMEOUT_MS 155
+#define CURLOPT_CONNECTTIMEOUT_MS 156
+#define CURL_SSLVERSION_TLSv1_2 6
+#define CURLINFO_RESPONSE_CODE 0x200002
+#define CURL_GLOBAL_DEFAULT 3
+static struct {
+    int (*global_init)(long);
+    void *(*easy_init)(void);
+    int (*easy_setopt)(void *, int, ...);
+    int (*easy_perform)(void *);
+    int (*easy_getinfo)(void *, int, ...);
+    void (*easy_cleanup)(void *);
+    void (*easy_reset)(void *);
+    void *(*slist_append)(void *, const char *);
+    void (*slist_free_all)(void *);
+} curl;
+
+static int curl_load(void)
+{
+    void *so = dlopen("libcurl.so.4", RTLD_NOW | RTLD_LOCAL);
+    if (!so)
+        so = dlopen("libcurl-gnutls.so.4", RTLD_NOW | RTLD_LOCAL);
+    if (!so)
+        return 0;
+    *(void **)&curl.global_init = dlsym(so, "curl_global_init");
+    *(void **)&curl.easy_init = dlsym(so, "curl_easy_init");
+    *(void **)&curl.easy_setopt = dlsym(so, "curl_easy_setopt");
+    *(void **)&curl.easy_perform = dlsym(so, "curl_easy_perform");
+    *(void **)&curl.easy_getinfo = dlsym(so, "curl_easy_getinfo");
+    *(void **)&curl.easy_cleanup = dlsym(so, "curl_easy_cleanup");
+    *(void **)&curl.easy_reset = dlsym(so, "curl_easy_reset");
+    *(void **)&curl.slist_append = dlsym(so, "curl_slist_append");
+    *(void **)&curl.slist_free_all = dlsym(so, "curl_slist_free_all");
+    if (!curl.global_init || !curl.easy_init || !curl.easy_setopt || !curl.easy_perform || !curl.easy_getinfo ||
+        !curl.easy_cleanup || !curl.easy_reset || !curl.slist_append || !curl.slist_free_all ||
+        curl.global_init(CURL_GLOBAL_DEFAULT)) {
+        dlclose(so);
+        return 0;
+    }
+    return 1;
+}
+
+typedef struct { char *buf; size_t n; } CurlReply;
+static size_t curl_take(char *p, size_t size, size_t n, void *arg)
+{
+    CurlReply *r = arg;
+    size_t k = size * n, room = CLOUD_REPLY_MAX - r->n;
+    memcpy(r->buf + r->n, p, k < room ? k : room);
+    r->n += k < room ? k : room;
+    return size * n;
+}
+#endif
+
 static const char *js_ws(const char *p)
 {
     while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
@@ -639,8 +659,6 @@ static int js_hex(char c)
     return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
 }
 
-/* a string at p (its opening quote): its text in out (cut at cap; \u above ASCII and control characters left
-   out, clean_name takes the rest), the end after its closing quote, NULL if broken */
 static const char *js_str(const char *p, char *out, size_t cap)
 {
     size_t n = 0;
@@ -649,7 +667,7 @@ static const char *js_str(const char *p, char *out, size_t cap)
     for (;;) {
         unsigned c = (u8)*p++;
         if (c < 0x20)
-            return NULL;                   /* the end of the text, or a raw control character */
+            return NULL;
         if (c == '"')
             break;
         if (c == '\\') {
@@ -681,7 +699,6 @@ static const char *js_str(const char *p, char *out, size_t cap)
     return p;
 }
 
-/* any value at p: the end after it, NULL if broken */
 static const char *js_skip(const char *p, int depth)
 {
     p = js_ws(p);
@@ -713,13 +730,12 @@ static const char *js_skip(const char *p, int depth)
             return *p == close ? p + 1 : NULL;
         }
     }
-    const char *s = p;                     /* a number, true, false, null */
+    const char *s = p;
     while (*p && strchr("+-0123456789.eEtrufalsn", *p))
         p++;
     return p > s ? p : NULL;
 }
 
-/* a whole number at p (no fraction, no exponent): *ok 0 if it is something else */
 static const char *js_int(const char *p, long long *v, int *ok)
 {
     const char *e = js_skip(p, 0);
@@ -736,7 +752,6 @@ static const char *js_int(const char *p, long long *v, int *ok)
     return e;
 }
 
-/* one row: *good when it has an alias, a name, car 411 and a believable lap */
 static const char *cloud_row(const char *p, Entry *r, int *good)
 {
     char name[64] = "", id[16] = "";
@@ -779,7 +794,7 @@ static const char *cloud_row(const char *p, Entry *r, int *good)
                 have |= 8;
             }
         } else {
-            bad |= !strcmp(key, "id") || !strcmp(key, "name");   /* not a string */
+            bad |= !strcmp(key, "id") || !strcmp(key, "name");
             if (!(p = js_skip(p, 1)))
                 return NULL;
         }
@@ -802,7 +817,6 @@ static const char *cloud_row(const char *p, Entry *r, int *good)
     return p;
 }
 
-/* GET /board's answer: the good rows in rows[], -1 if it is not a board */
 static int cloud_parse(const char *s, Entry *rows, int max)
 {
     const char *p = js_ws(s);
@@ -852,7 +866,6 @@ static int cloud_parse(const char *s, Entry *rows, int max)
     }
 }
 
-/* POST /submit's body: those four keys, nothing else (the name is clean_name's: printable ASCII) */
 static int cloud_body(char *out, size_t cap, const char *id, const char *name, int ms)
 {
     size_t n = (size_t)snprintf(out, cap, "{\"player_id\":\"%s\",\"name\":\"", id);
@@ -865,17 +878,15 @@ static int cloud_body(char *out, size_t cap, const char *id, const char *name, i
     return (int)n;
 }
 
-/* the server's rows into the board (any thread): 1 per row that made it new or better */
 static int cloud_merge(const Entry *rows, int n)
 {
     int changed = 0;
     EnterCriticalSection(&lock);
     board_load();
     for (int i = 0; i < n; i++) {
-        if (is_me(rows[i].id))             /* ours: only ever from this PC's own game */
+        if (is_me(rows[i].id))
             continue;
         Entry *e = find_player(rows[i].id);
-        /* the server's name is the one that player sent; a player met in multiplayer gives it there */
         int name_ok = !e || strlen(e->id) == ALIAS_LEN;
         changed += put(rows[i].id, rows[i].ms, rows[i].car, name_ok ? rows[i].name : NULL);
     }
@@ -887,7 +898,6 @@ static int cloud_merge(const Entry *rows, int n)
     return changed;
 }
 
-/* redbull_cloud.txt (under the lock): "sent <ms> <id>", the own best the server took, for this id only */
 static void cloud_state_load(void)
 {
     if (cl_state_loaded)
@@ -917,7 +927,6 @@ static void cloud_state_save(void)
     close_new(f, p, t);
 }
 
-/* a request that came to nothing: the board stays local; the wait before the next try (logged once a kind) */
 static int cloud_failed(int status)
 {
     int quota = status == 429 || status == 503;
@@ -926,7 +935,7 @@ static int cloud_failed(int status)
             rt_log("[board] cloud: the server is out of its quota (HTTP %d): the board stays this PC's and the "
                    "friends', next try in 10 min\n", status);
         else if (status == -1)
-            rt_log("[board] cloud: no answer (offline, or the server is down; WinHTTP %lu): the board stays this "
+            rt_log("[board] cloud: no answer (offline, or the server is down; " HTTP_LIB " %lu): the board stays this "
                    "PC's and the friends', next try in a minute\n", cl_err);
         else if (status == -2)
             rt_log("[board] cloud: the server's answer is not a leaderboard: the board stays local\n");
@@ -937,7 +946,7 @@ static int cloud_failed(int status)
     return quota ? CLOUD_QUOTA_WAIT : CLOUD_RETRY;
 }
 
-/* one request; the answer (NUL-ended, to free) in *reply; the HTTP status, -1 for no answer */
+#ifdef _WIN32
 static int cloud_http(HINTERNET ses, const wchar_t *verb, const char *path, const char *body, char **reply)
 {
     wchar_t wp[600];
@@ -952,7 +961,7 @@ static int cloud_http(HINTERNET ses, const wchar_t *verb, const char *path, cons
         req = WinHttpOpenRequest(con, verb, wp, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                  cl_url.secure ? WINHTTP_FLAG_SECURE : 0);
     if (req) {
-        DWORD off = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS;   /* the body goes to that server only */
+        DWORD off = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_REDIRECTS;
         WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &off, sizeof off);
         DWORD n = body ? (DWORD)strlen(body) : 0;
         if (WinHttpSendRequest(req, body ? L"Content-Type: application/json\r\n" : WINHTTP_NO_ADDITIONAL_HEADERS,
@@ -980,24 +989,68 @@ static int cloud_http(HINTERNET ses, const wchar_t *verb, const char *path, cons
         WinHttpCloseHandle(con);
     return status;
 }
+#else
+static int cloud_http(HINTERNET ses, const wchar_t *verb, const char *path, const char *body, char **reply)
+{
+    char url[1024];
+    *reply = NULL;
+    if (snprintf(url, sizeof url, "%s%s", cl_url.base, path) >= (int)sizeof url)
+        return -1;
+    CurlReply r = {malloc(CLOUD_REPLY_MAX + 1), 0};
+    if (!r.buf)
+        return -1;
+    curl.easy_reset(ses);
+    curl.easy_setopt(ses, CURLOPT_URL, url);
+    curl.easy_setopt(ses, CURLOPT_USERAGENT, "GTRacingPC-board/1");
+    curl.easy_setopt(ses, CURLOPT_NOSIGNAL, 1L);
+    curl.easy_setopt(ses, CURLOPT_FOLLOWLOCATION, 0L);
+    curl.easy_setopt(ses, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
+    curl.easy_setopt(ses, CURLOPT_CONNECTTIMEOUT_MS, (long)CLOUD_TIMEOUT);
+    curl.easy_setopt(ses, CURLOPT_TIMEOUT_MS, (long)CLOUD_TIMEOUT * 2);
+    curl.easy_setopt(ses, CURLOPT_WRITEFUNCTION, curl_take);
+    curl.easy_setopt(ses, CURLOPT_WRITEDATA, &r);
+    void *hdr = NULL;
+    if (verb[0] == L'P') {
+        hdr = curl.slist_append(NULL, "Content-Type: application/json");
+        curl.easy_setopt(ses, CURLOPT_HTTPHEADER, hdr);
+        curl.easy_setopt(ses, CURLOPT_POSTFIELDS, body ? body : "");
+        curl.easy_setopt(ses, CURLOPT_POSTFIELDSIZE, (long)(body ? strlen(body) : 0));
+    }
+    int status = -1, rc = curl.easy_perform(ses);
+    long code = 0;
+    if (!rc && !curl.easy_getinfo(ses, CURLINFO_RESPONSE_CODE, &code) && code > 0)
+        status = (int)code;
+    else
+        cl_err = (DWORD)rc;
+    if (hdr)
+        curl.slist_free_all(hdr);
+    r.buf[r.n] = 0;
+    *reply = r.buf;
+    return status;
+}
+#endif
 
 static DWORD WINAPI cloud_thread(void *arg)
 {
     CloudJob *j = arg;
-    static Entry rows[MAX_ENTRIES];        /* one request thread at a time (cl_busy) */
-    const wchar_t *agent = L"GTRacingPC-board/1";   /* nothing of this PC in it */
+    static Entry rows[MAX_ENTRIES];
+#ifdef _WIN32
+    const wchar_t *agent = L"GTRacingPC-board/1";
     HINTERNET ses = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                 WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!ses)                              /* before Windows 8.1 */
+    if (!ses)
         ses = WinHttpOpen(agent, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (ses) {
         WinHttpSetTimeouts(ses, CLOUD_TIMEOUT, CLOUD_TIMEOUT, CLOUD_TIMEOUT, CLOUD_TIMEOUT);
         DWORD tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
         if (!WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &tls, sizeof tls)) {
-            tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;     /* no TLS 1.3 before Windows 11 */
+            tls = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
             WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &tls, sizeof tls);
         }
     }
+#else
+    HINTERNET ses = curl.easy_init();
+#endif
     int wait = 0;
     char *reply = NULL;
     if (j->post_ms) {
@@ -1034,8 +1087,13 @@ static DWORD WINAPI cloud_thread(void *arg)
             wait = cloud_failed(st == 200 ? -2 : st);
         free(reply);
     }
+#ifdef _WIN32
     if (ses)
         WinHttpCloseHandle(ses);
+#else
+    if (ses)
+        curl.easy_cleanup(ses);
+#endif
     if (wait) {
         cl_wait_until = GetTickCount() + (DWORD)wait;
         InterlockedExchange(&cl_waiting, 1);
@@ -1046,8 +1104,6 @@ static DWORD WINAPI cloud_thread(void *arg)
     return 0;
 }
 
-/* the leaderboard menu (main thread): menu = 1 when it was just opened (a GET, once a minute at most); the own
-   best goes out whenever it is faster than the last one the server took.  Never waits: a thread does it. */
 static void cloud_kick(int menu)
 {
     if (cl_on <= 0 || InterlockedCompareExchange(&cl_busy, 1, 0))
@@ -1099,44 +1155,32 @@ static void cloud_init(void)
         rt_log("[board] cloud: no server (GT_CLOUD_BOARD_URL is empty): this PC's and the friends' board only\n");
     else if (!cloud_crack(u, &cl_url))
         rt_log("[board] cloud: GT_CLOUD_BOARD_URL is not an https:// address (plain http only to this PC): off\n");
+#ifndef _WIN32
+    else if (!curl_load())
+        rt_log("[board] cloud: no 32-bit libcurl (libcurl.so.4): this PC's and the friends' board only\n");
+#endif
     else {
         cl_on = 1;
         rt_log("[board] cloud: on (%s; the address is not logged)\n", cl_url.secure ? "https" : "http to this PC");
     }
 }
 
-/* the menu */
-
-/* exitbtn.c: NavigationMenu's events (the Red Bull page's Leaderboard tile) */
 void board_nav_event(const char *name, int kind)
 {
     if (on > 0 && kind == 6 && !strcmp(name, "btnLeaderboard"))
         redirect_until = GetTickCount() + 3000;
 }
 
-/* 0x376e68, after a Red Bull race: the end screen's Leaderboard button (EndMenu.btnRed_Leaderboard, FSCommand
-   GotoLeaderboard, the menus' FSCommand handler 0x259ba4 case 8) and the reward screen's exit when a new time is
-   to be sent (LeaveRewardScreen, case 13, with 0x376da4 set) both come here.  It sets the "leaderboard after the
-   race" byte (+8 of the object 0x3770c0 makes) and copies "GLLiveLoginMenu" to G+0x19d8 (256 bytes), the name the
-   menus' loader (0x2522cc, the menus state's enter) opens as the only menu (manager slot +0x28, not the push
-   hooked in menu3d.c).  On entry G+0x19d8 holds the menu a race goes back to (seen: "SubEventsMenu", the Red Bull
-   event's page).
-   Why here (a port fault otherwise: the Gameloft LIVE login page after the race): this path never pushes
-   GLLiveLoginMenu, so a hook on that push never runs; and "NavigationMenu" in G+0x19d8 (what the login's back,
-   LeaveGLLiveLoginMenu case 9, writes) opens on its first page, Community, not the Red Bull one.
-   Now: G+0x19d8 keeps the game's own menu (the race goes back as any race does) and the byte is cleared (the login
-   is never shown, nothing else is to read it); once that menu is up, the leaderboard is pushed over it as the
-   menus push (scene slot +0x34), so its Back goes to the Red Bull event's page. */
-#define G_STATES 0x1ba8                    /* the game's states, [G+0x1bd0] the current one's index (0x13cec8) */
+#define G_STATES 0x1ba8
 #define G_STATE_AT 0x1bd0
-#define SCENE_OPEN 0x34                    /* (self, name, 1 push, 0) */
-#define SC_MOVING 0x105                    /* scene byte: its camera is on its way */
-#define FN_RB_RACE_OBJ 0x3770c0u           /* -> the Red Bull race's object */
+#define SCENE_OPEN 0x34
+#define SC_MOVING 0x105
+#define FN_RB_RACE_OBJ 0x3770c0u
 #define FN_RB_RACE_END 0x376e68u
-static DWORD open_after_until;             /* push the leaderboard when the race's menu is up, until then */
+static DWORD open_after_until;
 static int open_after_frames;
-static char open_over[64];                 /* that menu */
-static int tab_after;                      /* 1: that leaderboard is up, 2: its Back pushed NavigationMenu */
+static char open_over[64];
+static int tab_after;
 
 void __real_F_376e68(CPU *c);
 void __wrap_F_376e68(CPU *c)
@@ -1156,10 +1200,9 @@ void __wrap_F_376e68(CPU *c)
     rt_log("[board] after the Red Bull race: %s, then the leaderboard over it (no Gameloft LIVE login)\n", was);
 }
 
-/* NavigationMenu's tab, as the game itself picks one (0x1e7e70: _root.NavigationMenu.ChangeToTab(n)) */
-#define FN_AS_NUMBER 0x507754u             /* (value, double as r1:r2) */
-#define FN_AS_FREE 0x506e0cu               /* (value) */
-#define FN_AS_CALL 0x50ac2cu               /* (player, object, method, args, [sp] count) */
+#define FN_AS_NUMBER 0x507754u
+#define FN_AS_FREE 0x506e0cu
+#define FN_AS_CALL 0x50ac2cu
 static void nav_tab(int tab)
 {
     static u32 val[8] __attribute__((aligned(16)));
@@ -1178,7 +1221,6 @@ static void nav_tab(int tab)
     rt_log("[board] NavigationMenu.ChangeToTab(%d)\n", tab);
 }
 
-/* the top menu (the menus' player's last one) when it is up (state 1), else 0 */
 static u32 top_menu(void)
 {
     u32 g = gt_game(), pl = g ? rd32(g + G_MENUS) : 0;
@@ -1187,8 +1229,6 @@ static u32 top_menu(void)
     return top && rd32(top + 0x58) == 1 ? top : 0;
 }
 
-/* the leaderboard's Back pushes NavigationMenu (its own ActionScript); after a race that menu was loaded anew and
-   comes on its first tab, Community (seen in my test): it is put on the Red Bull tab (6, found by trying 0..9) */
 #define NAV_TAB_RED_BULL 6
 static void tab_after_step(void)
 {
@@ -1205,7 +1245,6 @@ static void tab_after_step(void)
     nav_tab(NAV_TAB_RED_BULL);
 }
 
-/* pcinput.c's loop: the leaderboard over the race's menu, when that is up and still */
 static void open_after(void)
 {
     if ((int)(open_after_until - GetTickCount()) <= 0) {
@@ -1222,7 +1261,7 @@ static void open_after(void)
         open_after_frames = 0;
         return;
     }
-    if (++open_after_frames < 10)          /* its enter and first frames done */
+    if (++open_after_frames < 10)
         return;
     open_after_until = 0;
     rt_log("[board] the leaderboard over %s\n", open_over);
@@ -1230,8 +1269,6 @@ static void open_after(void)
     tab_after = 1;
 }
 
-/* GT_RED_BULL_BOARD_TEST_END=frame (testing): on that frame, the race's Leaderboard button is made as the end
-   screen makes it; the pause menu's Leave then leaves the race */
 void board_tick(void)
 {
     static int armed = -1, at;
@@ -1248,10 +1285,9 @@ void board_tick(void)
         return;
     armed = 0;
     u32 obj = rt_call1(FN_RB_RACE_OBJ, 0);
-    rt_call1(FN_RB_RACE_END, obj);         /* the address table's F_376e68 is the wrap (another object file) */
+    rt_call1(FN_RB_RACE_END, obj);
 }
 
-/* menu3d.c: the menu push (slot +0x34) */
 u32 board_menu_redirect(u32 name)
 {
     static const char menu[] = MENU;
@@ -1261,7 +1297,7 @@ u32 board_menu_redirect(u32 name)
         rt_log("[board] GLLiveLoginMenu -> " MENU " (offline leaderboard, no login)\n");
         return GA((void *)menu);
     }
-    if (tab_after == 1 && name)                /* after a race: the leaderboard's Back, or another way out */
+    if (tab_after == 1 && name)
         tab_after = !strcmp((const char *)GP(name), "NavigationMenu") ? 2 : 0;
     return name;
 }
@@ -1273,13 +1309,13 @@ static void car_name(int car, char *out, size_t cap)
     if (!cars)
         return;
     if (car <= 0)
-        car = RB_CAR;     /* the record keeps 0: the original's rows take the Time Trial's car, 411 (0x233ff8) */
+        car = RB_CAR;
     int idx = (int)rt_call2(GT_FN_CAR_INDEX, cars, (u32)car);
     if (idx < 0 || idx >= (int)rd32(cars + 8))
         return;
     static u16 buf[256];
     memset(buf, 0, sizeof buf);
-    rt_call4(FN_CAR_NAME, cars, (u32)idx, GA(buf), 0);   /* UTF-16 */
+    rt_call4(FN_CAR_NAME, cars, (u32)idx, GA(buf), 0);
     size_t n = 0;
     for (int i = 0; i < 255 && buf[i] && n + 4 < cap; i++) {
         unsigned ch = buf[i];
@@ -1305,8 +1341,6 @@ static void set_cell(u32 pl, const char *field, int row, const char *text, int m
     rt_call4(GT_FN_SWF_SET_TEXT, pl, GA(path), GA(html), 1);
 }
 
-/* the name a row shows, SHOW_LEN at most: "name#A1B2" for "iPad" (any case) and for a name another player on the
-   board has too (twin), the name cut to 11 for it; " (You)" on the own row when it still fits */
 static void show_name(const char *name, const char *alias, int twin, int mine, char *out, size_t cap)
 {
     int tag = twin || !_stricmp(name, "iPad");
@@ -1326,17 +1360,12 @@ static void show_name(const char *name, const char *alias, int twin, int mine, c
         snprintf(out + strlen(out), cap - strlen(out), " (You)");
 }
 
-/* the font size (per cent) a shown name needs to stay on one line of its column.  16 characters fit as a rule
-   (seen: "Twin Racer#65D7", "Racer1234 (You)"), but 16 wide letters do not: "WWWWWWWWWWWWWWWW" wrapped to a second
-   line over the next row.  The widths, in tenths of a pixel, are the menu font's at 1400 px
-   across, measured on screenshots (13 W 247 px, 16 O 243, 16 D 219, "Twin Racer#65D7" 186, "IPAD#A388" 114,
-   "Cloud 1" 77); the column holds about 265 px, a name over 250 is made smaller to fit. */
 static int name_fit(const char *s)
 {
     int w = 0;
     for (; *s; s++) {
         char c = *s;
-        if (c == 'W' || c == 'w')          /* a smaller font hardly makes W narrower: 80 % of 16 W wrapped still */
+        if (c == 'W' || c == 'w')
             w += 230;
         else if (c == 'M' || c == 'm')
             w += 195;
@@ -1345,7 +1374,7 @@ static int name_fit(const char *s)
         else if (c && strchr("rtfI() ", c))
             w += 85;
         else if (c >= 'A' && c <= 'Z')
-            w += 155;                      /* the widest capitals (O, D, Q) */
+            w += 155;
         else if (c >= 'a' && c <= 'z')
             w += 130;
         else
@@ -1355,7 +1384,6 @@ static int name_fit(const char *s)
     return pct < 55 ? 55 : pct;
 }
 
-/* another line of the board with the same name, as far as the column shows it (any case) */
 static int twin_of(const Entry *rows, int n, int i)
 {
     for (int k = 0; k < n; k++)
@@ -1442,8 +1470,6 @@ static void rb_update_hook(CPU *c)
         rb_update_fn(c);
         return;
     }
-    /* no server: the state machine stays idle, its requests are dropped; the network error the update would
-       report (global NET_ERROR with the menu's online byte: slot +0x78, "Connection Lost") is not seen here */
     wr32(self + RB_STATE, 1);
     wr32(self + RB_TIMEOUT, 0);
     wr32(self + RB_FLAGS, 0);
@@ -1466,23 +1492,20 @@ static void rb_update_hook(CPU *c)
     static LONG last_gen = -1;
     int tab = (int)rd32(self + RB_TAB) == 1;
     DWORD now = GetTickCount();
-    int entered = now - last_tick > 300;       /* the menu was not up: opened again */
+    int entered = now - last_tick > 300;
     last_tick = now;
     frames++;
     if (entered || tab != last_tab || generation != last_gen || frames % 30 == 0) {
         if (entered || frames % 120 == 0) {
             fake_record();
             own_sync();
-            cloud_kick(entered);               /* CLOUD_BOARD: a thread asks / sends; drawn when merged */
+            cloud_kick(entered);
         }
         last_tab = tab, last_gen = generation;
         draw(pl, tab);
     }
 }
 
-/* slot +0x0c (0x1bf2b8), the menu shown: with the game's online request object (G+0x4394) it listens to it
-   (+0x18 with the menu's listener at +0x4c8), and that request, with no server, reports "Connection Lost".
-   Opened here without it: the menu only resets its tabs and state. */
 static void (*rb_enter_fn)(CPU *);
 static void rb_enter_hook(CPU *c)
 {
@@ -1497,8 +1520,6 @@ static void rb_enter_hook(CPU *c)
     rt_log("[board] " MENU " opened%s\n", req ? " (the online request set aside)" : "");
 }
 
-/* slot +0x78 (0x1bd79c, shared by the online menus): a network error shown as a popup ("Connection Lost") and
-   kept in NET_ERROR.  This menu has no server any more: none is shown. */
 static void rb_error_hook(CPU *c)
 {
     static int said;
@@ -1506,9 +1527,6 @@ static void rb_error_hook(CPU *c)
         rt_log("[board] network error %u for " MENU ": not shown (no server)\n", c->r[1]);
 }
 
-/* 0x212170 (menu, text id, ...): the online menus' "Connection Lost" popup (DisconnectedPopup "Show").  The
-   menu's push (slot +0x14, 0x1bf418) shows it at once when the game has no online request (G+0x4394), its
-   listener callbacks (0x2122a4 ..) on errors.  Not for this menu any more: it has no server. */
 void __real_F_212170(CPU *c);
 void __wrap_F_212170(CPU *c)
 {
@@ -1541,8 +1559,6 @@ void board_init(void)
     cloud_init();
 }
 
-/* selftest (core/selftest.c, --selftest): no file, no network, the game's board left as it was */
-
 int board_selftest(char *why, size_t len)
 {
     static Entry saved[MAX_ENTRIES];
@@ -1555,12 +1571,11 @@ int board_selftest(char *why, size_t len)
     BT(d[0] == 0xba && d[1] == 0x78 && d[30] == 0x15 && d[31] == 0xad, "SHA-256(abc) wrong");
     char m[200];
     memset(m, 'a', sizeof m);
-    crypto_sha256(m, 200, d);                     /* two blocks of padding, and more than one of data */
+    crypto_sha256(m, 200, d);
     BT(d[0] == 0xc2 && d[1] == 0xa9 && d[31] == 0xe5, "SHA-256(200 x a) wrong: %02x%02x..%02x", d[0], d[1], d[31]);
     alias_of("0123abcd", a);
     BT(!strcmp(a, "edd6d2700d"), "alias(0123abcd) = %s, worker.js says edd6d2700d", a);
 
-    /* the server's answer: good rows taken, the rest left out */
     static Entry rows[16];
     int n = cloud_parse(" {\"v\":1,\"rows\":[{\"id\":\"edd6d2700d\",\"name\":\"Me \\\"x\\\"\",\"car\":411,\"time_ms\":77000},"
                         "{\"id\":\"aaaaaaaaaa\",\"name\":\"Fr\\u0069end\\n\",\"car\":411,\"time_ms\":76000,\"x\":[1,{\"a\":[]}]},"
@@ -1577,19 +1592,26 @@ int board_selftest(char *why, size_t len)
     BT(cloud_parse("{\"rows\":[{\"id\":\"aaaaaaaaaa\"", rows, 16) < 0 && cloud_parse("<html>", rows, 16) < 0 &&
        cloud_parse("", rows, 16) < 0 && cloud_parse("{\"rows\":[]}", rows, 16) == 0, "a broken answer read as a board");
 
-    /* what goes out: the four keys */
     cloud_body(buf, sizeof buf, "0123abcd", "A\"b\\c", 77736);
     BT(!strcmp(buf, "{\"player_id\":\"0123abcd\",\"name\":\"A\\\"b\\\\c\",\"car\":411,\"time_ms\":77736}"), "body %s", buf);
 
     CloudUrl u;
+#ifdef _WIN32
     BT(cloud_crack("https://board.example.dev/", &u) && u.secure && u.port == 443 && !wcscmp(u.host, L"board.example.dev") &&
        !u.base[0], "https URL");
     BT(cloud_crack("https://x.example.dev:8443/api/", &u) && u.port == 8443 && !wcscmp(u.base, L"/api"), "URL with a path");
     BT(cloud_crack("http://127.0.0.1:8787", &u) && !u.secure && u.port == 8787, "http to this PC");
+#else
+    BT(cloud_crack("https://board.example.dev/", &u) && u.secure && !strcmp(u.base, "https://board.example.dev"),
+       "https URL");
+    BT(cloud_crack("https://x.example.dev:8443/api/", &u) && !strcmp(u.base, "https://x.example.dev:8443/api"),
+       "URL with a path");
+    BT(cloud_crack("http://127.0.0.1:8787", &u) && !u.secure && cloud_crack("http://[::1]:8787/", &u),
+       "http to this PC");
+#endif
     BT(!cloud_crack("http://board.example.dev", &u) && !cloud_crack("ftp://x.dev", &u) && !cloud_crack("", &u) &&
        !cloud_crack("https://u:p@x.dev", &u) && !cloud_crack("https://x.dev/?k=1", &u), "a URL not refused");
 
-    /* the board: ours never from outside, one line per player whichever way the player came */
     EnterCriticalSection(&lock);
     memcpy(saved, board, sizeof saved);
     s_n = n_board, s_loaded = loaded, s_sent = cl_sent_ms, s_state = cl_state_loaded;
@@ -1625,7 +1647,6 @@ int board_selftest(char *why, size_t len)
        "a server player met in multiplayer: not one line under the own id");
     BT(me->ms == 80000 && !strcmp(me->name, "Me"), "a multiplayer line changed our own");
 
-    /* what the rows show */
     char out[40];
     show_name("Racer", "edd6d2700d", 0, 0, out, sizeof out);
     BT(!strcmp(out, "Racer"), "unique name: %s", out);

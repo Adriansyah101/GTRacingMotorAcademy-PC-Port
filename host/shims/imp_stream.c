@@ -1,34 +1,21 @@
-/* imp_stream.c -- the iostreams the game imports: ifstream, fstream, stringstream, istringstream,
-   ostringstream, their << and >> and read/seekg/tellg/clear.
-
-   Every constructor is an import, so the host lays the objects out itself, but the game inlines
-   libstdc++'s small accessors (fail(), eof(), operator!, flags/precision/width setters, the ios_base
-   manipulators like std::hex), which reach the stream's virtual base basic_ios the Itanium way:
-   vptr[-3] is the offset from the subobject to it.  So each stream here is (GCC 4.2, 32-bit):
-
-     +0   vptr (istream / ostream / iostream role)      +4  gcount (istream)
-     +8   vptr of the ostream subobject of an iostream (the game adds 8 itself to get there)
-     +12  host state (Stream *)
-     +16  basic_ios: ios_base {vptr, precision, width, flags, exceptions, state ...} + basic_ios fields
-
-   That is 152 bytes, less than any of these classes (the game reserves their real size).  The
-   vtables' function slots stop the game with a message: nothing calls them virtually. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include "compat.h"
+#endif
 
 #include "abi.h"
 #include "ns.h"
 
-#define IOS 16                     /* basic_ios within the object */
+#define IOS 16
 #define IOS_SIZE 136
-/* ios_base fields */
 #define I_PREC 4
 #define I_WIDTH 8
 #define I_FLAGS 12
 #define I_STATE 20
-#define I_FILL 116                 /* basic_ios::_M_fill, _M_fill_init at +117 */
+#define I_FILL 116
 
 enum { F_BOOLALPHA = 1, F_DEC = 2, F_FIXED = 4, F_HEX = 8, F_INTERNAL = 16, F_LEFT = 32, F_OCT = 64, F_RIGHT = 128,
        F_SCIENTIFIC = 256, F_SHOWBASE = 512, F_SHOWPOINT = 1024, F_SHOWPOS = 2048, F_SKIPWS = 4096,
@@ -37,8 +24,8 @@ enum { S_BAD = 1, S_EOF = 2, S_FAIL = 4 };
 enum { M_APP = 1, M_ATE = 2, M_IN = 8, M_OUT = 16, M_TRUNC = 32 };
 
 typedef struct {
-    FILE *f;                       /* file streams */
-    char *buf;                     /* string streams */
+    FILE *f;
+    char *buf;
     u32 len, cap, gpos, ppos;
     u32 mode;
     int is_file;
@@ -48,13 +35,10 @@ void gt_string_make(u32 out, const char *s, u32 n);
 const char *gt_string_cstr(u32 str);
 u32 h_ZNSs6assignEPKcm(u32 self, u32 s, u32 n);
 
-/* vtables */
-
 static void virtual_call(CPU *c)
 {
     rt_fatal("a virtual function of a host iostream was called (return address 0x%08x)", c->r[14]);
 }
-/* [offset to virtual base, offset to top, typeinfo, functions...]: the vptr points at the functions */
 static u32 vt_primary[3 + 16], vt_second[3 + 16], vt_ios[3 + 16];
 static void vtables(void)
 {
@@ -106,8 +90,6 @@ static void destruct(u32 obj)
     wr32(top_of(obj) + 12, 0);
 }
 
-/* the buffer */
-
 static void put(u32 p, const char *t, u32 n)
 {
     Stream *s = st_of(p);
@@ -151,7 +133,6 @@ static void ungetch(u32 p, int ch)
         s->gpos--;
 }
 
-/* formatted output with the stream's width, fill and adjustment */
 static void put_field(u32 p, const char *t, u32 n)
 {
     u32 ios = ios_of(p), w = rd32(ios + I_WIDTH), fl = rd32(ios + I_FLAGS);
@@ -180,8 +161,6 @@ static void put_int(u32 p, int64_t v, int is_signed)
         snprintf(t, sizeof t, "%llu", (unsigned long long)(u32)v);
     put_field(p, t, (u32)strlen(t));
 }
-
-/* constructors / destructors / files */
 
 static FILE *open_file(const char *guest, u32 mode)
 {
@@ -265,7 +244,6 @@ u32 h_ZNSt19basic_istringstreamIcSt11char_traitsIcESaIcEEC1ERKSsSt13_Ios_Openmod
 u32 h_ZNSt19basic_istringstreamIcSt11char_traitsIcESaIcEED1Ev(u32 self) { destruct(self); return self; }
 u32 h_ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEEC1ESt13_Ios_Openmode(u32 self, u32 mode) { construct(self, mode | M_OUT, 0); return self; }
 u32 h_ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEED1Ev(u32 self) { destruct(self); return self; }
-/* str() const: the result by value (sret) */
 void h_ZNKSt18basic_stringstreamIcSt11char_traitsIcESaIcEE3strEv(u32 out, u32 self)
 {
     Stream *s = st_of(self);
@@ -279,8 +257,6 @@ void h_ZNSt18basic_stringstreamIcSt11char_traitsIcESaIcEE3strERKSs(u32 self, u32
 {
     set_str(self, gt_string_cstr(str), str_len(str));
 }
-
-/* output */
 
 u32 h_ZNSolsEi(u32 os, u32 v) { put_int(os, (s32)v, 1); return os; }
 u32 h_ZNSolsEj(u32 os, u32 v) { put_int(os, v, 0); return os; }
@@ -314,14 +290,11 @@ u32 h_ZStlsIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_St8_SetfillIS3_E(u32
     ((u8 *)GP(ios_of(os)))[I_FILL] = (u8)fill;
     return os;
 }
-/* operator<<(ios_base& (*)(ios_base&)): std::hex, std::fixed... (the game's own inline copies) */
 u32 h_ZNSolsEPFRSt8ios_baseS0_E(u32 os, u32 fn)
 {
     rt_call1(fn, ios_of(os));
     return os;
 }
-
-/* input */
 
 static int skip_ws(u32 is)
 {
@@ -331,7 +304,6 @@ static int skip_ws(u32 is)
     while (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f');
     return ch;
 }
-/* a token of characters in `set` after white space; returns its length */
 static int token(u32 is, char *t, int max, const char *set)
 {
     if (state(is)) {
@@ -437,7 +409,6 @@ u32 h_ZNSi5seekgExSt12_Ios_Seekdir(u32 is, u64 off, u32 dir)
     }
     return is;
 }
-/* tellg(): fpos<mbstate_t> {streamoff, mbstate_t (128 bytes on Darwin)} by value (sret) */
 void h_ZNSi5tellgEv(u32 out, u32 is)
 {
     Stream *s = st_of(is);
@@ -447,5 +418,4 @@ void h_ZNSi5tellgEv(u32 out, u32 is)
     memset(GP(out), 0, 136);
     memcpy(GP(out), &at, 8);
 }
-/* basic_ios::clear(iostate): this is the basic_ios */
 void h_ZNSt9basic_iosIcSt11char_traitsIcEE5clearESt12_Ios_Iostate(u32 ios, u32 st) { wr32(ios + I_STATE, st); }

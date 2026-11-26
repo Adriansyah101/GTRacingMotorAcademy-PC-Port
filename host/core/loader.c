@@ -1,16 +1,7 @@
-﻿/* loader.c -- maps the game image at its own addresses and binds its imports.
-
-   The exe reserved GT_RESERVE_START..GT_RESERVE_END as its first section (reserve.S), so the
-   segments are copied there; guest bytes below GT_LOW_END go to the low copy (layout.h).
-   Every import gets a value for its slots:
-     - data the host provides (rt_data_import: Objective-C classes, CF constants, std data...),
-     - a function: a 4-byte address of its own in the import range; a call through it reaches
-       the import's bridge (bridges.c) via rt_call_indirect,
-     - data the host does not have: an address in a no-access guard page (the fault names it). */
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "loader.h"
 #include "macho.h"
@@ -71,7 +62,6 @@ const char *gt_guard_name(u32 addr)
     return i < nguard ? guard_name[i] : "?";
 }
 
-/* Imports seen only as data words: by name, data or a function whose address is taken. */
 static int data_by_name(const char *n)
 {
     static const char *const prefix[] = {"_OBJC_CLASS_$_", "_OBJC_METACLASS_$_", "_OBJC_EHTYPE_",
@@ -160,7 +150,7 @@ static int bind_weak(void *ctx, uint32_t slot, const char *name, int ordinal, in
     bind_ctx *b = ctx;
     if (flags & BINDF_STRONG_DEF)
         return 0;
-    if (macho_lookup(&M, name)) {           /* the game's own definition: the slot already holds it */
+    if (macho_lookup(&M, name)) {
         b->skipped_weak++;
         return 0;
     }
@@ -204,9 +194,8 @@ int gt_load(const char *path, char *err, size_t errsz)
         copy_range(s->vmaddr, s->vmaddr + s->filesize, M.data + s->fileoff);
     }
     gt_entry = M.entry;
-    gt_mh_header = GT_LOWCOPY_BASE;         /* the header is at 0x1000 in the low copy */
+    gt_mh_header = GT_LOWCOPY_BASE;
 
-    /* Pointers to the Mach-O header (__program_vars, the local _mh_execute_header slot). */
     unsigned mh = 0;
     for (int i = 0; i < M.nsects; i++) {
         const macho_sect *s = &M.sects[i];

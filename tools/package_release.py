@@ -1,40 +1,3 @@
-"""Stage 5: a clean release folder of the GT Racing PC port from the release build (build/host/release, made by
-python -I host/build.py --release: GT_DEV=0, no diagnostic key or trace).
-
-usage: python -I tools/package_release.py [--version V] [--out DIR] [--include-patch] [--console] [--no-run] [--force]
-                                          [--zip]
-
-  --version V        the folder's name: GTRacing-PC-Port-<V>-Windows-x86 (default: today's date)
-  --out DIR          where the folder goes (default build/release)
-  --include-patch    also copy build/host/patch: the menu files the build patched for the PC menus (Controls rows,
-                     Display, Exit and Name tiles).  They are Gameloft's menu files, changed: the folder is then
-                     named ...-PRIVATE and must not be shared.  Without it the release has the game's own menus.
-  --console          keep the console window (the build's subsystem); by default the release exe is a window
-                     program (no console behind the game)
-  --no-run           skip the check run of the stripped exe (--selftest)
-  --force            replace an existing release folder of that name (and its zip)
-  --zip              also make <out>/<folder>.zip: the folder as its one top folder, read back and compared
-
-What it does:
-  1. gtracing.exe is copied and stripped (strip --strip-all: the debug info and the symbol table).  Then each
-     section the loader maps is checked against the build's: same address, size, flags and bytes, the reserved
-     .gtimg (host/core/reserve.S, gt.ld) first at 0x11000; entry point, image base and data directories the same.
-  2. Only these go in: gtracing.exe, SDL3.dll, gtracing.ini, README.txt and IMPORTANT.TXT (tools/release templates:
-     the player's defaults, not the developer's own ini; IMPORTANT.TXT holds the link to the notes and downloads of
-     the optional patch/ and add-on/ folders), SHA256SUMS.txt; patch/ with --include-patch.
-     The folders GTRacingFreemiumHD.app/, patch/ and add-on/ come along empty but for a note each
-     (tools/release/folders), so a player sees where the game and the optional files go.  The exe skips a
-     GTRacingFreemiumHD.app without the game's program in it (host/core/main.c find_app).  Nothing else of
-     build/host (gtracing.map, err.txt, app.rc, logs, link.rsp, home folders, obj, shots) can come along.
-  3. gtracing.map goes to <out>/symbols/<folder>.map, outside the release: crash logs name host addresses, and
-     the map of the same build turns them into function names.
-  4. Every file of the release is searched (tools/privacy_scan.py: 8-bit and UTF-16LE, any case) for the Windows
-     user's name, the PC's name, the Windows user's folder, C:\\Users and the project's folder (each folder name in
-     its path); any hit stops the script.
-     The exe must also hold no debug section and no symbol table.
-  5. The stripped exe runs --selftest against the project's GTRacingFreemiumHD.app with its home, log and ini in a
-     temporary folder (nothing is written into the release), and its log is searched the same way.
-"""
 import datetime
 import hashlib
 import os
@@ -42,18 +5,21 @@ import shutil
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-BUILD = os.path.join(ROOT, 'build', 'host')                # SDL3.dll and patch/ (both builds share them)
-RELEASE_BUILD = os.path.join(BUILD, 'release')               # gtracing.exe and gtracing.map of the release build
+BUILD = os.path.join(ROOT, 'build', 'host')
+RELEASE_BUILD = os.path.join(BUILD, 'release')
+LINUX_RELEASE_BUILD = os.path.join(BUILD, 'linux', 'release')
 APP = os.path.join(ROOT, 'GTRacingFreemiumHD.app')
 MSYS = r'C:\msys64\mingw32\bin'
-STRIP = os.path.join(MSYS, 'strip.exe')
+STRIP = os.path.join(MSYS, 'strip.exe') if os.name == 'nt' else 'strip'
 TEMPLATES = os.path.join(HERE, 'release')
-RESERVE_START = 0x11000                     # host/games/gtracing/layout.h GT_RESERVE_START
+RESERVE_START = 0x11000
+RESERVE_END = 0x900000
 
 PC_MENUS_WITH = ("The PC menus are in (patch\\): Options > Display changes the settings above in the game, Options >\n"
                  "Controls shows and changes the keys, the main menu has an Exit tile and the multiplayer page a\n"
@@ -61,8 +27,11 @@ PC_MENUS_WITH = ("The PC menus are in (patch\\): Options > Display changes the s
 PC_MENUS_WITHOUT = ("This release has the game's own menus: the PC menus (Options > Display, the keys page in Options >\n"
                     "Controls, the Exit and Name tiles) come in the optional patch\\ folder (see above), which is\n"
                     "empty here.  Without its files, change the settings in gtracing.ini.")
-RELEASE_FILES = ('gtracing.exe', 'SDL3.dll', 'gtracing.ini', 'README.txt', 'IMPORTANT.TXT')   # SHA256SUMS.txt last
-FOLDERS = os.path.join(TEMPLATES, 'folders')             # <folder>/<note>.txt, copied with CRLF line ends
+RELEASE_FILES = ('gtracing.exe', 'SDL3.dll', 'gtracing.ini', 'README.txt', 'IMPORTANT.TXT')
+LINUX_FILES = ('gtracing', 'gtracing.ini', 'README.txt', 'IMPORTANT.TXT')
+LINUX_INI = (('read by gtracing.exe at', 'read by gtracing at'),
+             ("(scaled with Windows' display scale)", "(scaled with the desktop's display scale)"))
+FOLDERS = os.path.join(TEMPLATES, 'folders')
 NOTE_DIRS = ('GTRacingFreemiumHD.app', 'patch', 'add-on')
 
 
@@ -70,8 +39,6 @@ def fail(msg):
     print('FAILED: ' + msg)
     sys.exit(1)
 
-
-# PE
 
 class PE:
     def __init__(self, path):
@@ -96,7 +63,7 @@ class PE:
         self.dirs = [struct.unpack_from('<II', d, self.opt + 96 + 8 * i) for i in range(min(ndirs, 16))]
         self.sections = []
         s = self.opt + opt_size
-        strtab = self.symtab + 18 * self.nsyms if self.symtab else 0   # long section names ("/4" = offset 4)
+        strtab = self.symtab + 18 * self.nsyms if self.symtab else 0
         for i in range(nsec):
             name = bytes(d[s:s + 8]).rstrip(b'\0').decode('latin-1')
             if name.startswith('/') and name[1:].isdigit() and strtab:
@@ -108,7 +75,6 @@ class PE:
             s += 40
 
     def mapped(self):
-        """the sections the loader maps (not the debug ones: .debug* / .zdebug*, or discardable)"""
         return [x for x in self.sections if not x['name'].lstrip('.').startswith(('debug', 'zdebug')) and
                 not x['flags'] & 0x02000000]
 
@@ -121,7 +87,6 @@ class PE:
         self.subsystem = sub
 
     def fix_checksum(self):
-        """the PE checksum (imagehlp's CheckSumMappedFile): 16-bit sums with carry, the field itself left out"""
         off = self.opt + 64
         struct.pack_into('<I', self.data, off, 0)
         d = bytes(self.data) + (b'\0' if len(self.data) % 2 else b'')
@@ -137,7 +102,6 @@ class PE:
 
 
 def check_strip(orig, stripped):
-    """every mapped section, the entry, the base and the data directories as the build's"""
     a, b = orig.mapped(), stripped.mapped()
     if [x['name'] for x in a] != [x['name'] for x in b]:
         fail('strip changed the sections: %s -> %s' % ([x['name'] for x in a], [x['name'] for x in b]))
@@ -155,7 +119,7 @@ def check_strip(orig, stripped):
     first = b[0]
     if first['name'] != '.gtimg' or stripped.image_base + first['va'] != RESERVE_START:
         fail('the reserved game range is not the first section at 0x%x' % RESERVE_START)
-    if stripped.nsyms:                    # a string table may stay: it spells long section names (.eh_frame)
+    if stripped.nsyms:
         fail('the stripped exe still has %d symbols' % stripped.nsyms)
     left = [x['name'] for x in stripped.sections if x not in stripped.mapped()]
     if left:
@@ -163,13 +127,65 @@ def check_strip(orig, stripped):
     return len(b)
 
 
-# privacy scan (tools/privacy_scan.py)
+class ELF:
+    def __init__(self, path):
+        self.path = path
+        d = self.data = open(path, 'rb').read()
+        if d[:4] != b'\x7fELF' or d[4] != 1 or d[5] != 1:
+            fail('%s: not a 32-bit little-endian ELF file' % path)
+        (self.type, self.machine, _, self.entry, phoff, shoff, _, _, phsz, phnum, shsz, shnum,
+         shstrndx) = struct.unpack_from('<HHIIIIIHHHHHH', d, 16)
+        self.segments = [struct.unpack_from('<IIIIIIII', d, phoff + i * phsz) for i in range(phnum)]
+        raw = [struct.unpack_from('<IIIIIIIIII', d, shoff + i * shsz) for i in range(shnum)]
+        names = raw[shstrndx] if shnum else None
+        self.sections = []
+        for n, typ, flags, addr, off, size, _, _, _, _ in raw:
+            o = names[4] + n
+            name = d[o:d.index(b'\0', o)].decode('latin-1') if names else ''
+            self.sections.append(dict(name=name, type=typ, flags=flags, va=addr, off=off, size=size))
 
-sys.path.insert(0, HERE)                    # python -I leaves the script's folder off the path
+    def mapped(self):
+        return [x for x in self.sections if x['flags'] & 2]
+
+    def content(self, sec):
+        return b'' if sec['type'] == 8 else self.data[sec['off']:sec['off'] + sec['size']]
+
+
+def check_strip_elf(orig, stripped):
+    a, b = orig.mapped(), stripped.mapped()
+    if [x['name'] for x in a] != [x['name'] for x in b]:
+        fail('strip changed the sections: %s -> %s' % ([x['name'] for x in a], [x['name'] for x in b]))
+    for x, y in zip(a, b):
+        for k in ('va', 'size', 'flags', 'type'):
+            if x[k] != y[k]:
+                fail('strip changed %s %s: 0x%x -> 0x%x' % (x['name'], k, x[k], y[k]))
+        if orig.content(x) != stripped.content(y):
+            fail('strip changed the bytes of %s' % x['name'])
+    load = [(t, va, fsz, msz, fl) for t, _, va, _, fsz, msz, fl, _ in orig.segments if t == 1]
+    if load != [(t, va, fsz, msz, fl) for t, _, va, _, fsz, msz, fl, _ in stripped.segments if t == 1]:
+        fail('strip changed the loaded segments')
+    if (orig.entry, orig.type) != (stripped.entry, stripped.type) or stripped.type != 2:
+        fail('strip changed the entry point, or the file is not a fixed-address executable')
+    g = [x for x in b if x['name'] == '.gtimg']
+    if not g or g[0]['va'] != RESERVE_START or g[0]['size'] != RESERVE_END - RESERVE_START or g[0]['type'] != 8:
+        fail('the reserved game range is not an empty section at 0x%x..0x%x' % (RESERVE_START, RESERVE_END))
+    left = [x['name'] for x in stripped.sections if x['name'] in ('.symtab', '.strtab') or
+            x['name'].lstrip('.').startswith(('debug', 'zdebug'))]
+    if left:
+        fail('the stripped file still has %s' % left)
+    return len(b)
+
+
+def tar_info(t):
+    t.uid = t.gid = 0
+    t.uname = t.gname = ''
+    t.mode = 0o755 if t.isdir() or t.name.endswith('/gtracing') else 0o644
+    return t
+
+
+sys.path.insert(0, HERE)
 from privacy_scan import mask, private_words, scan_bytes, scan_paths  # noqa: E402
 
-
-# main
 
 def sha256(path):
     h = hashlib.sha256()
@@ -192,19 +208,27 @@ def main():
     version = opt('--version', datetime.date.today().isoformat())
     out = os.path.abspath(opt('--out', os.path.join(ROOT, 'build', 'release')))
     with_patch = '--include-patch' in args
+    linux = opt('--platform', 'windows') == 'linux'
+    if opt('--platform', 'windows') not in ('windows', 'linux'):
+        fail('--platform: windows or linux')
     if not version.replace('.', '').replace('-', '').replace('_', '').isalnum():
         fail('--version: letters, digits, dots and dashes only')
-    name = 'GTRacing-PC-Port-%s-Windows-x86%s' % (version, '-PRIVATE' if with_patch else '')
+    name = 'GTRacing-PC-Port-%s-%s-x86%s' % (version, 'Linux' if linux else 'Windows', '-PRIVATE' if with_patch else '')
     dest = os.path.join(out, name)
+    eol = '\n' if linux else '\r\n'
+    sep = '/' if linux else '\\'
 
-    exe = os.path.join(RELEASE_BUILD, 'gtracing.exe')
-    for need in (exe, os.path.join(BUILD, 'SDL3.dll'), STRIP, os.path.join(TEMPLATES, 'gtracing.ini'),
-                 os.path.join(TEMPLATES, 'README.txt'), os.path.join(TEMPLATES, 'IMPORTANT.TXT'),
-                 *[os.path.join(FOLDERS, d) for d in NOTE_DIRS]):
+    exe = os.path.join(LINUX_RELEASE_BUILD, 'gtracing') if linux else os.path.join(RELEASE_BUILD, 'gtracing.exe')
+    template = os.path.join(TEMPLATES, 'README-linux.txt' if linux else 'README.txt')
+    needs = [exe, os.path.join(TEMPLATES, 'gtracing.ini'), template, os.path.join(TEMPLATES, 'IMPORTANT.TXT'),
+             *[os.path.join(FOLDERS, d) for d in NOTE_DIRS]]
+    if not linux:
+        needs += [os.path.join(BUILD, 'SDL3.dll'), STRIP]
+    for need in needs:
         if not os.path.exists(need):
             fail('missing %s' % need)
-    zip_path = dest + '.zip'
-    make_zip = '--zip' in args
+    zip_path = dest + ('.tar.gz' if linux else '.zip')
+    make_zip = '--zip' in args or '--archive' in args
     if os.path.exists(dest) or (make_zip and os.path.exists(zip_path)):
         if '--force' not in args:
             fail('%s exists (--force replaces it)' % (dest if os.path.exists(dest) else zip_path))
@@ -215,31 +239,45 @@ def main():
     os.makedirs(dest)
     print('release folder: %s' % dest)
 
-    # 1. the exe, stripped and checked
-    orig = PE(exe)
-    rel_exe = os.path.join(dest, 'gtracing.exe')
-    p = subprocess.run([STRIP, '--strip-all', '-o', rel_exe, exe], capture_output=True, text=True)
+    rel_exe = os.path.join(dest, os.path.basename(exe))
+    strip = 'strip' if linux and os.name != 'nt' else STRIP
+    orig = ELF(exe) if linux else PE(exe)
+    p = subprocess.run([strip, '--strip-all', '-o', rel_exe, exe], capture_output=True, text=True)
     if p.returncode:
         fail('strip: %s' % (p.stdout + p.stderr).strip())
-    stripped = PE(rel_exe)
-    n = check_strip(orig, stripped)
-    if '--console' not in args:
-        stripped.set_subsystem(2)               # IMAGE_SUBSYSTEM_WINDOWS_GUI: no console window behind the game
-    stripped.fix_checksum()
-    stripped.save()
-    print('gtracing.exe: stripped %.1f -> %.1f MB; %d mapped sections, .gtimg at 0x%x, entry and directories '
-          'unchanged; %s subsystem' % (os.path.getsize(exe) / 1e6, os.path.getsize(rel_exe) / 1e6, n, RESERVE_START,
-                                       'console' if stripped.subsystem == 3 else 'window'))
+    if linux:
+        stripped = ELF(rel_exe)
+        n = check_strip_elf(orig, stripped)
+        os.chmod(rel_exe, 0o755)
+        print('gtracing: stripped %.1f -> %.1f MB; %d loaded sections, .gtimg at 0x%x, segments and entry '
+              'unchanged' % (os.path.getsize(exe) / 1e6, os.path.getsize(rel_exe) / 1e6, n, RESERVE_START))
+    else:
+        stripped = PE(rel_exe)
+        n = check_strip(orig, stripped)
+        if '--console' not in args:
+            stripped.set_subsystem(2)
+        stripped.fix_checksum()
+        stripped.save()
+        print('gtracing.exe: stripped %.1f -> %.1f MB; %d mapped sections, .gtimg at 0x%x, entry and directories '
+              'unchanged; %s subsystem' % (os.path.getsize(exe) / 1e6, os.path.getsize(rel_exe) / 1e6, n,
+                                           RESERVE_START, 'console' if stripped.subsystem == 3 else 'window'))
+        shutil.copy2(os.path.join(BUILD, 'SDL3.dll'), dest)
 
-    # 2. the rest, by name only
-    shutil.copy2(os.path.join(BUILD, 'SDL3.dll'), dest)
-    shutil.copy2(os.path.join(TEMPLATES, 'gtracing.ini'), dest)
+    ini = open(os.path.join(TEMPLATES, 'gtracing.ini'), encoding='utf-8').read()
+    for a, b in LINUX_INI if linux else ():
+        if a not in ini:
+            fail('the gtracing.ini template no longer says "%s"' % a)
+        ini = ini.replace(a, b)
+    with open(os.path.join(dest, 'gtracing.ini'), 'w', encoding='utf-8', newline=eol) as f:
+        f.write(ini.replace('\r\n', '\n'))
     shutil.copy2(os.path.join(TEMPLATES, 'IMPORTANT.TXT'), dest)
-    readme = open(os.path.join(TEMPLATES, 'README.txt'), encoding='utf-8').read()
-    readme = readme.replace('{PC_MENUS}', PC_MENUS_WITH if with_patch else PC_MENUS_WITHOUT)
+    readme = open(template, encoding='utf-8').read()
+    menus = PC_MENUS_WITH if with_patch else PC_MENUS_WITHOUT
+    readme = readme.replace('{PC_MENUS}', menus.replace('patch\\', 'patch' + sep))
     if with_patch:
-        readme = readme.replace('the PC menus, see below; empty in the zip)', 'the PC menus, in this copy)  ')
-    with open(os.path.join(dest, 'README.txt'), 'w', encoding='utf-8', newline='\r\n') as f:
+        readme = readme.replace('the PC menus, see below; empty in the %s)' % ('tar.gz' if linux else 'zip'),
+                                'the PC menus, in this copy)  ' + ('     ' if linux else ''))
+    with open(os.path.join(dest, 'README.txt'), 'w', encoding='utf-8', newline=eol) as f:
         f.write(readme)
     if with_patch:
         src = os.path.join(BUILD, 'patch')
@@ -251,29 +289,28 @@ def main():
     else:
         print('patch/: left out (Gameloft menu files; --include-patch for a private copy)')
 
-    # the three folders with their notes (a note only: no game file, no menu file, no add-on)
     for d in NOTE_DIRS:
         os.makedirs(os.path.join(dest, d), exist_ok=True)
         if d == 'patch' and with_patch:
-            continue                    # filled: its note says the folder is empty
+            continue
         for fn in sorted(os.listdir(os.path.join(FOLDERS, d))):
             text = open(os.path.join(FOLDERS, d, fn), encoding='utf-8').read()
-            with open(os.path.join(dest, d, fn), 'w', encoding='utf-8', newline='\r\n') as f:
+            if linux:
+                text = text.replace('gtracing.exe', 'gtracing').replace('\\', '/')
+            with open(os.path.join(dest, d, fn), 'w', encoding='utf-8', newline=eol) as f:
                 f.write(text)
     print('folders with a note: %s' % ', '.join(d + '/' for d in NOTE_DIRS))
 
-    # 3. the symbols, outside the release
     symdir = os.path.join(out, 'symbols')
     os.makedirs(symdir, exist_ok=True)
-    mp = os.path.join(RELEASE_BUILD, 'gtracing.map')
+    mp = os.path.join(os.path.dirname(exe), 'gtracing.map')
     if os.path.exists(mp):
         shutil.copy2(mp, os.path.join(symdir, name + '.map'))
         with open(os.path.join(symdir, name + '.txt'), 'w') as f:
-            f.write('gtracing.exe as built (before strip) sha256 %s\nthe release exe sha256 %s\n' %
-                    (sha256(exe), sha256(rel_exe)))
+            f.write('%s as built (before strip) sha256 %s\nthe release %s sha256 %s\n' %
+                    (os.path.basename(exe), sha256(exe), 'program' if linux else 'exe', sha256(rel_exe)))
         print('symbols: %s (not in the release)' % os.path.join(symdir, name + '.map'))
 
-    # 4. the privacy scan
     words = private_words()
     bad = scan_paths([dest], words, base=dest)
     if bad:
@@ -281,8 +318,10 @@ def main():
     print('privacy scan: %d files, %d private strings looked for (8-bit and UTF-16LE): none found' %
           (sum(len(f) for _, _, f in os.walk(dest)), len(words)))
 
-    # 5. a check run of the stripped exe
     if '--no-run' not in args:
+        if linux and os.name == 'nt':
+            fail('the check run of the Linux build needs Linux or WSL (python3 tools/package_release.py there), '
+                 'or --no-run')
         if not os.path.isdir(APP):
             fail('no %s for the check run (or --no-run)' % APP)
         tmp = tempfile.mkdtemp(prefix='gtrel_')
@@ -293,7 +332,8 @@ def main():
             for k in list(env):
                 if k.upper().startswith('GT_'):
                     del env[k]
-            env.update(GT_HOME=os.path.join(tmp, 'home'), GT_LOG=os.path.join(tmp, 'gtracing.log'), GT_INI=ini)
+            env.update(GT_HOME=os.path.join(tmp, 'home'), GT_LOG=os.path.join(tmp, 'gtracing.log'), GT_INI=ini,
+                       GT_CLOUD_BOARD='0')
             p = subprocess.run([rel_exe, '--selftest', '--app', APP], cwd=tmp, env=env, timeout=300)
             log = open(os.path.join(tmp, 'gtracing.log'), 'rb').read() if os.path.exists(env['GT_LOG']) else b''
             line = [ln for ln in log.decode('utf-8', 'replace').splitlines() if 'checks failed' in ln]
@@ -303,19 +343,17 @@ def main():
             if hits:
                 fail('the check run\'s log names: %s' % ', '.join('"%s" (%s)' % (mask(w), e) for w, e, _ in hits))
             print('check run: %s; its log names no private string' % line[-1].strip())
-            left = [f for f in os.listdir(dest) if f not in RELEASE_FILES + NOTE_DIRS]
+            left = [f for f in os.listdir(dest) if f not in (LINUX_FILES if linux else RELEASE_FILES) + NOTE_DIRS]
             if left:
                 fail('the check run wrote into the release: %s' % left)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    # the folder holds the release files and nothing else (patch/ only with --include-patch)
     found = sorted(os.listdir(dest))
-    want = sorted(RELEASE_FILES + NOTE_DIRS)
+    want = sorted((LINUX_FILES if linux else RELEASE_FILES) + NOTE_DIRS)
     if found != want:
         fail('the release folder holds %s, not %s' % (found, want))
 
-    # the checksums last, of what is in the folder now
     with open(os.path.join(dest, 'SHA256SUMS.txt'), 'w', newline='\n') as f:
         for d, _, files in sorted(os.walk(dest)):
             for fn in sorted(files):
@@ -324,8 +362,27 @@ def main():
                 p = os.path.join(d, fn)
                 f.write('%s  %s\n' % (sha256(p), os.path.relpath(p, dest).replace('\\', '/')))
 
-    # the zip: every file under one top folder of the release's name, read back and compared
-    if make_zip:
+    if make_zip and linux:
+        files = []
+        for d, dirs, fns in sorted(os.walk(dest)):
+            for x in sorted(dirs) + sorted(fns):
+                files.append(os.path.relpath(os.path.join(d, x), dest).replace('\\', '/'))
+        with tarfile.open(zip_path, 'w:gz', compresslevel=9, format=tarfile.PAX_FORMAT) as t:
+            t.add(dest, name, recursive=False, filter=tar_info)
+            for rel in files:
+                t.add(os.path.join(dest, rel), name + '/' + rel, recursive=False, filter=tar_info)
+        with tarfile.open(zip_path, 'r:gz') as t:
+            for m in t.getmembers():
+                if m.uid or m.gid or m.uname or m.gname:
+                    fail('the tar.gz names an owner for %s' % m.name)
+                if m.isfile() and t.extractfile(m).read() != open(os.path.join(out, m.name), 'rb').read():
+                    fail('the tar.gz\'s %s differs from the folder\'s' % m.name)
+            mode = t.getmember(name + '/gtracing').mode
+            if mode != 0o755:
+                fail('gtracing in the tar.gz is not executable (mode %o)' % mode)
+        print('tar.gz: %s, %d entries, %d bytes, sha256 %s' % (zip_path, len(files) + 1, os.path.getsize(zip_path),
+                                                              sha256(zip_path)))
+    elif make_zip:
         files = []
         for d, _, fns in sorted(os.walk(dest)):
             for fn in sorted(fns):

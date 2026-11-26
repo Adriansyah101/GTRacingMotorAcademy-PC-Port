@@ -1,5 +1,3 @@
-/* hmap.h -- small open-addressing hash maps (u32 -> u32, string -> u32) for the runtime.
-   Not thread-safe by themselves: callers lock. */
 #ifndef GT_HMAP_H
 #define GT_HMAP_H
 
@@ -8,7 +6,7 @@
 
 #include "arm_rt.h"
 
-typedef struct { u32 *k, *v; u32 mask, n; } Map32;     /* key 0 is never stored */
+typedef struct { u32 *k, *v; u32 mask, n; } Map32;
 
 static inline u32 hm_hash32(u32 k)
 {
@@ -56,7 +54,6 @@ static inline void m32_del(Map32 *m, u32 k)
     u32 *s = m32_slot(m, k);
     if (!*s)
         return;
-    /* backward-shift deletion */
     u32 i = (u32)(s - m->k);
     m->k[i] = 0;
     m->n--;
@@ -122,7 +119,6 @@ static inline int ms_get(MapStr *m, const char *k, u32 *v)
     *v = m->v[i];
     return 1;
 }
-/* k must stay alive (the map keeps the pointer) */
 static inline void ms_put(MapStr *m, const char *k, u32 v)
 {
     if (!m->k || (m->n + 1) * 4 > (m->mask + 1) * 3)

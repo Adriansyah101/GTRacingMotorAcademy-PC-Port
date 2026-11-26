@@ -1,5 +1,5 @@
-GT Racing: Motor Academy HD - PC port (Windows, x86)
-====================================================
+GT Racing: Motor Academy HD - PC port 1.0.1 (Windows, x86)
+==========================================================
 
 A static recompilation of the iPad game (free edition, version 1.3.4b) that runs on Windows.
 
@@ -12,6 +12,9 @@ Setting up
 1. Copy the contents of the GTRacingFreemiumHD.app folder from your own copy of the iPad game into the empty
    GTRacingFreemiumHD.app folder here (its note, PUT THE GAME HERE.txt, says what goes in).
 2. Start gtracing.exe.
+
+Updating from 1.0.0: unpack this zip to a new folder, put the game in it as above, then copy home\, gtracing.ini,
+patch\ and add-on\ over from the 1.0.0 folder.  Saves and settings are unchanged.
 
 The folder then looks like this:
     gtracing.exe

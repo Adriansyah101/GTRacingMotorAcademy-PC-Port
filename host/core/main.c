@@ -1,11 +1,12 @@
-/* main.c -- the GT Racing host (stage 3): loads the iPad game's image, binds its imports and
-   runs the recompiled code from the Mach-O entry point (start -> main -> UIApplicationMain).
-
-   usage: gtracing.exe [--app <path to GTRacingFreemiumHD.app>] [--trace] */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <signal.h>
+#include <ucontext.h>
+#endif
 
 #include "gl.h"
 #include "liveblocks.h"
@@ -16,10 +17,10 @@
 
 static char app_dir[MAX_PATH], exe_dir[MAX_PATH];
 
-void gt_objc_init(void);           /* objc.c: the runtime and the root classes */
-void gt_objc_image(void);          /* objc.c: classes, categories, selectors of the image */
-void gt_objc_load(void);           /* objc.c: +load methods */
-extern char gt_reserve_start[];    /* gt.ld / reserve.S: the first byte of the game's range */
+void gt_objc_init(void);
+void gt_objc_image(void);
+void gt_objc_load(void);
+extern char gt_reserve_start[];
 
 static int is_dir(const char *p)
 {
@@ -27,14 +28,10 @@ static int is_dir(const char *p)
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* a game folder counts only with the game's program in it.  The release zip carries an empty
-   GTRacingFreemiumHD.app\ holding a note (as the Gangstar port's), so a player sees where the game goes; that
-   placeholder is skipped.  A copy put one level too deep (GTRacingFreemiumHD.app\GTRacingFreemiumHD.app\, an easy
-   slip when dropping the game into the placeholder) is taken as well. */
 static int has_game(const char *dir)
 {
     char p[MAX_PATH * 3];
-    if (snprintf(p, sizeof p, "%s\\" GT_GAME_NAME, dir) >= (int)sizeof p)
+    if (snprintf(p, sizeof p, "%s" GT_SEP GT_GAME_NAME, dir) >= (int)sizeof p)
         return 0;
     DWORD a = GetFileAttributesA(p);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
@@ -48,25 +45,24 @@ static int take_app(const char *path)
         return 0;
     if (has_game(app_dir))
         return 1;
-    snprintf(tmp, sizeof tmp, "%s\\" GT_GAME_NAME ".app", app_dir);
+    snprintf(tmp, sizeof tmp, "%s" GT_SEP GT_GAME_NAME ".app", app_dir);
     if (is_dir(tmp) && has_game(tmp)) {
         GetFullPathNameA(tmp, sizeof app_dir, app_dir, NULL);
         return 1;
     }
-    return -1;                                  /* the folder is there, the game is not */
+    return -1;
 }
 
-/* 1 found; 0 no game folder; -1 only an empty one (the release's placeholder) */
 static int find_app(int argc, char **argv)
 {
     for (int i = 1; i + 1 < argc; i++)
         if (!strcmp(argv[i], "--app"))
             return take_app(argv[i + 1]);
-    static const char *const rel[] = {"", "\\..", "\\..\\..", "\\..\\..\\.."};
+    static const char *const rel[] = {"", GT_SEP "..", GT_SEP ".." GT_SEP "..", GT_SEP ".." GT_SEP ".." GT_SEP ".."};
     int empty = 0;
     for (size_t i = 0; i < sizeof rel / sizeof *rel; i++) {
         char tmp[MAX_PATH * 2];
-        snprintf(tmp, sizeof tmp, "%s%s\\" GT_GAME_NAME ".app", exe_dir, rel[i]);
+        snprintf(tmp, sizeof tmp, "%s%s" GT_SEP GT_GAME_NAME ".app", exe_dir, rel[i]);
         int r = take_app(tmp);
         if (r > 0)
             return 1;
@@ -76,15 +72,11 @@ static int find_app(int argc, char **argv)
     return empty ? -1 : 0;
 }
 
-/* faults */
-
-/* Reads of guest addresses 0x1000..0x11000 made from a pointer the game computed (a NULL object's
-   field: NULL + 0x1d84) are fine on iOS, where that is the start of __TEXT, and the game relies on it
-   (applicationWillResignActive in the menus).  Windows cannot map below 64 KB, but the bytes are at
-   LOWCOPY: the faulting x86 instruction is decoded, its base (or index) register moved by
-   GT_LOW_DELTA, the instruction single-stepped and the register put back. */
 static __thread struct { int reg, active; u32 delta, eip; } low_fix;
 
+#ifdef _WIN32
+#define GT_LD "gt.ld"
+#define GT_MAP_PATH "build\\host\\gtracing.map"
 static DWORD *ctx_reg(CONTEXT *x, int r)
 {
     switch (r) {
@@ -98,8 +90,16 @@ static DWORD *ctx_reg(CONTEXT *x, int r)
     default: return &x->Edi;
     }
 }
+#else
+#define GT_LD "gt_linux.ld"
+#define GT_MAP_PATH "build/host/linux/gtracing.map"
+static greg_t *ctx_reg(ucontext_t *x, int r)
+{
+    static const int map[8] = {REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESP, REG_EBP, REG_ESI, REG_EDI};
+    return &x->uc_mcontext.gregs[map[r & 7]];
+}
+#endif
 
-/* the operand's registers of the instruction at p: 1 if understood */
 static int decode_mem(const u8 *p, int *base, int *index, int *scale, int *dest, int *dest_is_input)
 {
     int two = 0;
@@ -114,26 +114,26 @@ static int decode_mem(const u8 *p, int *base, int *index, int *scale, int *dest,
     *dest_is_input = 0;
     if (!two) {
         if (op == 0x8B || op == 0x8A)
-            *dest = 1;                                   /* mov r, r/m */
+            *dest = 1;
         else if ((op & 0xC7) <= 0x03 && (op & 0xC7) >= 0x02 && op < 0x40) {
-            *dest = 1;                                   /* add/or/adc/sbb/and/sub/xor/cmp r, r/m */
-            *dest_is_input = (op & 0xF8) != 0x38;        /* cmp writes nothing */
+            *dest = 1;
+            *dest_is_input = (op & 0xF8) != 0x38;
             if ((op & 0xF8) == 0x38)
                 *dest = -1;
         } else if (op == 0x69 || op == 0x6B)
-            *dest = 1;                                   /* imul r, r/m, imm */
+            *dest = 1;
         else if (!((op >= 0x80 && op <= 0x85) || op == 0xF6 || op == 0xF7 || op == 0xFF || op == 0x38 ||
                    op == 0x39 || op == 0x3A || op == 0x3B))
             return 0;
     } else {
         if (op == 0xB6 || op == 0xB7 || op == 0xBE || op == 0xBF)
-            *dest = 1;                                   /* movzx / movsx */
+            *dest = 1;
         else if (op == 0xAF || (op >= 0x40 && op <= 0x4F)) {
-            *dest = 1;                                   /* imul, cmovcc */
+            *dest = 1;
             *dest_is_input = 1;
         } else if (!(op == 0x10 || op == 0x12 || op == 0x16 || op == 0x28 || op == 0x2E || op == 0x2F ||
                      op == 0x6E || op == 0x6F || op == 0x7E || (op >= 0x51 && op <= 0x5F) || op == 0x5A))
-            return 0;                                    /* xmm loads and arithmetic */
+            return 0;
     }
     u8 modrm = *p++;
     int mod = modrm >> 6, reg = (modrm >> 3) & 7, rm = modrm & 7;
@@ -159,37 +159,47 @@ static int decode_mem(const u8 *p, int *base, int *index, int *scale, int *dest,
     return *base >= 0 || *index >= 0;
 }
 
+#ifdef _WIN32
+#define CTX_EIP(x) ((x)->Eip)
+#define CTX_EFL(x) ((x)->EFlags)
 static int fix_low_read(EXCEPTION_POINTERS *e, u32 addr)
 {
     CONTEXT *x = e->ContextRecord;
+#else
+#define CTX_EIP(x) ((x)->uc_mcontext.gregs[REG_EIP])
+#define CTX_EFL(x) ((x)->uc_mcontext.gregs[REG_EFL])
+static int fix_low_read(ucontext_t *x, u32 addr)
+{
+#endif
     int base, index, scale, dest, dest_in;
-    if (!decode_mem((const u8 *)(uintptr_t)x->Eip, &base, &index, &scale, &dest, &dest_in))
+    if (!decode_mem((const u8 *)(uintptr_t)CTX_EIP(x), &base, &index, &scale, &dest, &dest_in))
         return 0;
     int r = base >= 0 ? base : index;
     u32 delta = base >= 0 ? GT_LOW_DELTA : GT_LOW_DELTA / (u32)scale;
     if (r == dest && dest_in)
-        return 0;                                        /* add eax, [eax+...]: cannot be undone */
+        return 0;
     static u32 seen[64];
     for (int i = 0; i < 64; i++) {
-        if (seen[i] == x->Eip)
+        if (seen[i] == (u32)CTX_EIP(x))
             break;
         if (!seen[i]) {
-            seen[i] = x->Eip;
+            seen[i] = (u32)CTX_EIP(x);
             CPU *c = rt_cpu();
             rt_log("[low] the game read guest 0x%05x (a NULL pointer's field, readable on iOS) at host 0x%08lx, "
-                   "lr 0x%08x\n", addr, x->Eip, c->r[14]);
+                   "lr 0x%08x\n", addr, (unsigned long)CTX_EIP(x), c->r[14]);
             break;
         }
     }
     *ctx_reg(x, r) += delta;
-    low_fix.reg = r == dest ? -1 : r;                    /* overwritten by the load itself */
+    low_fix.reg = r == dest ? -1 : r;
     low_fix.delta = delta;
     low_fix.active = 1;
-    low_fix.eip = x->Eip;
-    x->EFlags |= 0x100;                                  /* trap after this one instruction */
+    low_fix.eip = (u32)CTX_EIP(x);
+    CTX_EFL(x) |= 0x100;
     return 1;
 }
 
+#ifdef _WIN32
 void gt_dump_note(EXCEPTION_POINTERS *ep);
 int gt_dump_is_writer(void);
 __attribute__((noreturn)) void gt_crash(int code, const char *why);
@@ -198,7 +208,7 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *e)
 {
     DWORD code = e->ExceptionRecord->ExceptionCode;
     if (gt_dump_is_writer())
-        return EXCEPTION_CONTINUE_SEARCH;               /* dbghelp's own, while the crash dump is written */
+        return EXCEPTION_CONTINUE_SEARCH;
     if (code == EXCEPTION_SINGLE_STEP && low_fix.active) {
         low_fix.active = 0;
         if (low_fix.reg >= 0)
@@ -245,20 +255,105 @@ static LONG CALLBACK on_fault(EXCEPTION_POINTERS *e)
            "      r8-r12 %08x %08x %08x %08x %08x  sp %08x lr %08x\n", c->r[0], c->r[1], c->r[2], c->r[3],
            c->r[4], c->r[5], c->r[6], c->r[7], c->r[8], c->r[9], c->r[10], c->r[11], c->r[12], c->r[13], c->r[14]);
     gles_fault_dump();
-    rt_log("(the host address names the function: build\\host\\gtracing.map)\n");
-    gt_crash(4, why);                                   /* crashdump.c: the dump and the box */
+    rt_log("(the host address names the function: " GT_MAP_PATH ")\n");
+    gt_crash(4, why);
+}
+#else
+void gt_dump_note(int sig, const siginfo_t *si, const ucontext_t *uc);
+__attribute__((noreturn)) void gt_crash(int code, const char *why);
+
+static void on_fault(int sig, siginfo_t *si, void *ctx)
+{
+    ucontext_t *x = ctx;
+    if (sig == SIGTRAP && low_fix.active) {
+        low_fix.active = 0;
+        if (low_fix.reg >= 0)
+            *ctx_reg(x, low_fix.reg) -= low_fix.delta;
+        CTX_EFL(x) &= ~0x100;
+        return;
+    }
+    long err = x->uc_mcontext.gregs[REG_ERR];
+    u32 addr = (u32)(uintptr_t)si->si_addr;
+    if (sig == SIGSEGV && !(err & 2) && !(err & 0x10) && addr >= GT_LOW_START && addr < GT_LOW_END &&
+        fix_low_read(x, addr))
+        return;
+    u32 eip = (u32)CTX_EIP(x);
+    static char why[512];
+    gt_dump_note(sig, si, x);
+    if (sig == SIGSEGV || sig == SIGBUS) {
+        const char *g = gt_guard_name(addr);
+        const char *imp = rt_addr_name(addr);
+        const char *what = err & 0x10 ? "execute" : err & 2 ? "write" : "read";
+        rt_log("\n[FAULT] %s of 0x%08x at host 0x%08x%s%s%s%s\n", what, addr, eip,
+               g ? " -- missing data import " : "", g ? g : "", imp ? " -- import address of " : "",
+               imp ? imp : "");
+        snprintf(why, sizeof why, "The game crashed: a bad memory %s at 0x%08x (host 0x%08x).", what, addr, eip);
+    } else {
+        rt_log("\n[FAULT] signal %d at host 0x%08x\n", sig, eip);
+        snprintf(why, sizeof why, "The game crashed: %s (signal %d at host 0x%08x).",
+                 sig == SIGFPE ? "a division by zero" : sig == SIGABRT ? "an abort" :
+                 sig == SIGTRAP ? "a breakpoint" : "an illegal instruction", sig, eip);
+    }
+    Dl_info di;
+    if (dladdr((void *)(uintptr_t)eip, &di) && di.dli_fname && di.dli_fbase &&
+        (uintptr_t)di.dli_fbase != GT_EXE_BASE)
+        rt_log("host address is in %s+0x%x\n", di.dli_fname, eip - (u32)(uintptr_t)di.dli_fbase);
+    CPU *c = rt_cpu();
+    rt_log("guest r0-r3 %08x %08x %08x %08x  r4-r7 %08x %08x %08x %08x\n"
+           "      r8-r12 %08x %08x %08x %08x %08x  sp %08x lr %08x\n", c->r[0], c->r[1], c->r[2], c->r[3],
+           c->r[4], c->r[5], c->r[6], c->r[7], c->r[8], c->r[9], c->r[10], c->r[11], c->r[12], c->r[13], c->r[14]);
+    gles_fault_dump();
+    rt_log("(the host address names the function: " GT_MAP_PATH ")\n");
+    gt_crash(4, why);
 }
 
-/* main */
+void gt_alt_stack(void);
+static void faults_on(void)
+{
+    gt_alt_stack();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_fault;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    static const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP, SIGABRT};
+    for (size_t i = 0; i < sizeof sigs / sizeof *sigs; i++)
+        sigaction(sigs[i], &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+}
+
+typedef struct { int argc; char **argv; int rc; } MainArgs;
+int game_main(int argc, char **argv);
+static void *main_thread(void *p)
+{
+    MainArgs *a = p;
+    a->rc = game_main(a->argc, a->argv);
+    return NULL;
+}
+int main(int argc, char **argv)
+{
+    MainArgs a = {argc, argv, 0};
+    pthread_attr_t at;
+    pthread_t t;
+    pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 64u << 20);
+    int bad = pthread_create(&t, &at, main_thread, &a);
+    pthread_attr_destroy(&at);
+    if (bad)
+        return game_main(argc, argv);
+    pthread_join(t, NULL);
+    return a.rc;
+}
+#define main game_main
+#endif
 
 int main(int argc, char **argv)
 {
     char path[MAX_PATH * 2], err[512] = "";
     GetModuleFileNameA(NULL, exe_dir, sizeof exe_dir);
-    char *s = strrchr(exe_dir, '\\');
+    char *s = strrchr(exe_dir, GT_SEPC);
     if (s)
         *s = 0;
-    /* DISPLAY_MENU's restart (display.c): the run that asked for it ends first (its save, its log) */
     const char *wait_pid = getenv("GT_WAIT_PID");
     if (wait_pid && *wait_pid) {
         HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)strtoul(wait_pid, NULL, 10));
@@ -268,25 +363,22 @@ int main(int argc, char **argv)
         }
         _putenv_s("GT_WAIT_PID", "");
     }
-    gt_settings_load(exe_dir);                          /* gtracing.ini and the defaults (settings.c) */
-    /* GT_LOG=<file>: the log there (two runs at once for LAN_MULTIPLAYER, a test's scratch log); GT_LOG=0: no log,
-       neither the file nor the console (rt_log_open).  From the environment or gtracing.ini. */
+    gt_settings_load(exe_dir);
     const char *log_env = getenv("GT_LOG");
     int log_off = log_env && !strcmp(log_env, "0");
     if (log_env && *log_env)
         snprintf(path, sizeof path, "%s", log_env);
     else
-        snprintf(path, sizeof path, "%s\\gtracing.log", exe_dir);
-    /* CRASH_DUMP (scrub.c): the log names no folder of the player's, from its first line */
+        snprintf(path, sizeof path, "%s" GT_SEP "gtracing.log", exe_dir);
     rt_hide_path(exe_dir, "%EXE%");
     if (getenv("GT_HOME") && *getenv("GT_HOME"))
         rt_hide_path(getenv("GT_HOME"), "%HOME%");
     rt_log_open(path);
-    gt_settings_log();                                  /* the file's "[ini]" lines, scrubbed */
-    gt_live_init();                                     /* LIVE_BLOCKS (liveblocks.c): GT_LIVE_BLOCKS read now */
-    if (log_off)                                        /* the dump keeps its place next to the program */
-        snprintf(path, sizeof path, "%s\\gtracing.log", exe_dir);
-    gt_dump_arm(path);                                  /* CRASH_DUMP (crashdump.c): gtracing.dmp by the log */
+    gt_settings_log();
+    gt_live_init();
+    if (log_off)
+        snprintf(path, sizeof path, "%s" GT_SEP "gtracing.log", exe_dir);
+    gt_dump_arm(path);
 #if GT_DEV
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--trace"))
@@ -294,19 +386,23 @@ int main(int argc, char **argv)
     if (dev_getenv("GT_TRACE"))
         rt_trace = 1;
 #endif
+#ifdef _WIN32
     AddVectoredExceptionHandler(1, on_fault);
+#else
+    faults_on();
+#endif
 
     if ((u32)(uintptr_t)gt_reserve_start != GT_RESERVE_START)
-        rt_fatal("the exe's reserved range starts at %p, not 0x%x (link with gt.ld)", gt_reserve_start,
+        rt_fatal("the exe's reserved range starts at %p, not 0x%x (link with " GT_LD ")", gt_reserve_start,
                  GT_RESERVE_START);
     int found = find_app(argc, argv);
     if (found < 0)
-        rt_fatal("The " GT_GAME_NAME ".app folder next to gtracing.exe has no game in it.  Copy the files of "
+        rt_fatal("The " GT_GAME_NAME ".app folder next to " GT_EXE_NAME " has no game in it.  Copy the files of "
                  "your own iPad game's " GT_GAME_NAME ".app into it (see the note in that folder).");
     if (!found)
         rt_fatal("no " GT_GAME_NAME ".app next to the program (or give --app <folder>)");
     rt_hide_path(app_dir, "%APP%");
-    snprintf(path, sizeof path, "%s\\" GT_GAME_NAME, app_dir);
+    snprintf(path, sizeof path, "%s" GT_SEP GT_GAME_NAME, app_dir);
 
     RtThread *t = rt_thread_new(8u << 20);
     CPU *c = &t->cpu;
@@ -331,8 +427,6 @@ int main(int argc, char **argv)
             return 0;
         }
 
-    /* argv / envp / apple as the kernel leaves them for start: on the guest stack (the guest's
-       own path for the executable, inside its bundle). */
     static char exe_path[MAX_PATH * 2];
     snprintf(exe_path, sizeof exe_path, "%s/%s", gt_guest_bundle, GT_GAME_NAME);
     static char *gargv[2], *genvp[1], *gapple[2];
@@ -342,9 +436,8 @@ int main(int argc, char **argv)
     vars_argc = 1;
     (void)vars_argc;
 
-    gt_game_running = 1;                                /* a crash from here on has a dump (crashdump.c) */
+    gt_game_running = 1;
 
-    /* C++ and other static initializers, in order, as dyld runs them before start. */
     for (u32 i = 0; i < gt_ninit; i++) {
         u32 fn = rd32(gt_init_funcs + 4 * i);
         if (rt_trace)

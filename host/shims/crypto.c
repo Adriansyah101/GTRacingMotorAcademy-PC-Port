@@ -1,6 +1,3 @@
-/* crypto.c -- CommonCrypto as the game imports it: CC_MD5, CC_SHA1 (one-shot and streaming),
-   CC_SHA256, CCHmac and CCCrypt (AES-128/192/256, ECB or CBC, PKCS#7 padding).  Plain C versions of
-   the standard algorithms (RFC 1321, FIPS 180-4, RFC 2104, FIPS 197). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,8 +7,6 @@
 
 static u32 rol(u32 x, int n) { return x << n | x >> (32 - n); }
 static u32 ror(u32 x, int n) { return x >> n | x << (32 - n); }
-
-/* MD5 */
 
 typedef struct { u32 s[4]; u64 n; u8 buf[64]; } Md5;
 static void md5_block(Md5 *m, const u8 *p)
@@ -77,9 +72,7 @@ static void md5_final(Md5 *m, u8 *out)
             out[4 * i + j] = (u8)(m->s[i] >> (8 * j));
 }
 
-/* SHA-1, SHA-256 */
-
-typedef struct { u32 s[5]; u64 n; u8 buf[64]; } Sha1;       /* 92 bytes: fits CC_SHA1_CTX (96) */
+typedef struct { u32 s[5]; u64 n; u8 buf[64]; } Sha1;
 static void sha1_block(Sha1 *h, const u8 *p)
 {
     u32 w[80];
@@ -189,7 +182,6 @@ static void sha256_final(Sha256 *h, u8 *out)
             out[4 * i + j] = (u8)(h->s[i] >> (24 - 8 * j));
 }
 
-/* SHA-256 for the host's own use (crypto.h) */
 void crypto_sha256(const void *data, size_t n, u8 out[32])
 {
     Sha256 h;
@@ -226,12 +218,10 @@ u32 h_CC_SHA256(u32 data, u32 len, u32 md)
     return md;
 }
 
-/* HMAC */
-
 static int hash_once(u32 alg, const u8 *p, u32 n, const u8 *p2, u32 n2, u8 *out)
 {
     switch (alg) {
-    case 0: {   /* kCCHmacAlgSHA1 */
+    case 0: {
         Sha1 h;
         sha1_init(&h);
         sha1_update(&h, p, n);
@@ -239,7 +229,7 @@ static int hash_once(u32 alg, const u8 *p, u32 n, const u8 *p2, u32 n2, u8 *out)
         sha1_final(&h, out);
         return 20;
     }
-    case 1: {   /* MD5 */
+    case 1: {
         Md5 m;
         md5_init(&m);
         md5_update(&m, p, n);
@@ -247,7 +237,7 @@ static int hash_once(u32 alg, const u8 *p, u32 n, const u8 *p2, u32 n2, u8 *out)
         md5_final(&m, out);
         return 16;
     }
-    case 2: {   /* SHA256 */
+    case 2: {
         Sha256 h;
         sha256_init(&h);
         sha256_update(&h, p, n);
@@ -272,8 +262,6 @@ void h_CCHmac(u32 alg, u32 key, u32 keylen, u32 data, u32 len, u32 out)
     int n = hash_once(alg, ipad, 64, GP(data), len, inner);
     hash_once(alg, opad, 64, inner, (u32)n, GP(out));
 }
-
-/* AES (FIPS 197) and CCCrypt */
 
 static u8 sbox[256], inv_sbox[256];
 static u8 xt(u8 x) { return (u8)(x << 1 ^ (x & 0x80 ? 0x1b : 0)); }
@@ -336,10 +324,10 @@ static void aes_enc(const Aes *a, u8 *s)
         s[i] ^= a->rk[i];
     for (int r = 1; r <= a->rounds; r++) {
         u8 t[16];
-        for (int i = 0; i < 16; i++)                    /* SubBytes + ShiftRows */
+        for (int i = 0; i < 16; i++)
             t[i] = sbox[s[(i + 4 * (i % 4)) % 16]];
         if (r < a->rounds)
-            for (int c = 0; c < 4; c++) {               /* MixColumns */
+            for (int c = 0; c < 4; c++) {
                 u8 *x = t + 4 * c, a0 = x[0], a1 = x[1], a2 = x[2], a3 = x[3];
                 x[0] = xt(a0) ^ xt(a1) ^ a1 ^ a2 ^ a3;
                 x[1] = a0 ^ xt(a1) ^ xt(a2) ^ a2 ^ a3;
@@ -356,12 +344,12 @@ static void aes_dec(const Aes *a, u8 *s)
         s[i] ^= a->rk[16 * a->rounds + i];
     for (int r = a->rounds - 1; r >= 0; r--) {
         u8 t[16];
-        for (int i = 0; i < 16; i++)                    /* InvShiftRows + InvSubBytes */
+        for (int i = 0; i < 16; i++)
             t[(i + 4 * (i % 4)) % 16] = inv_sbox[s[i]];
         for (int i = 0; i < 16; i++)
             t[i] ^= a->rk[16 * r + i];
         if (r > 0)
-            for (int c = 0; c < 4; c++) {               /* InvMixColumns */
+            for (int c = 0; c < 4; c++) {
                 u8 *x = t + 4 * c, a0 = x[0], a1 = x[1], a2 = x[2], a3 = x[3];
                 x[0] = gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9);
                 x[1] = gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13);
@@ -372,7 +360,6 @@ static void aes_dec(const Aes *a, u8 *s)
     }
 }
 
-/* CCCrypt(op, alg, options, key, keyLength, iv, dataIn, dataInLength, dataOut, dataOutAvailable, dataOutMoved) */
 void I_CCCrypt(CPU *c)
 {
     u32 op = c->r[0], alg = c->r[1], opt = c->r[2], key = c->r[3];
@@ -380,19 +367,19 @@ void I_CCCrypt(CPU *c)
     u32 keylen = st[0], iv = st[1], in = st[2], inlen = st[3], out = st[4], avail = st[5], moved = st[6];
     if (alg != 0 || (keylen != 16 && keylen != 24 && keylen != 32)) {
         rt_log("[crypto] CCCrypt algorithm %u key %u bytes: not supported\n", alg, keylen);
-        c->r[0] = (u32)-4305;   /* kCCUnimplemented */
+        c->r[0] = (u32)-4305;
         return;
     }
     int pad = opt & 1, ecb = opt & 2;
     u32 n = op == 0 && pad ? (inlen / 16 + 1) * 16 : inlen;
     if (op == 0 && !pad && inlen % 16) {
-        c->r[0] = (u32)-4303;   /* kCCAlignmentError */
+        c->r[0] = (u32)-4303;
         return;
     }
     if (n > avail) {
         if (moved)
             wr32(moved, n);
-        c->r[0] = (u32)-4301;   /* kCCBufferTooSmall */
+        c->r[0] = (u32)-4301;
         return;
     }
     Aes a;
@@ -431,7 +418,7 @@ void I_CCCrypt(CPU *c)
     if (op == 1 && pad && n >= 16) {
         u32 p = dst[n - 1];
         if (p < 1 || p > 16) {
-            c->r[0] = (u32)-4304;   /* kCCDecodeError */
+            c->r[0] = (u32)-4304;
             return;
         }
         n -= p;

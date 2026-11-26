@@ -1,60 +1,16 @@
-/* display.c -- DISPLAY_MENU: Options' Customer Care tile becomes Display (port addition).
-
-   The Display page holds resolution, aspect ratio, anti-aliasing and anisotropic filtering.  Customer Care opens
-   Gameloft's support pages,
-   which need the network (this port is offline).
-
-   The tile: tools/swfpatch_display.py puts a copy of the Controls tile (a monitor drawn on Customer
-   Care's platform) in its place; it keeps the name btnCustomSupport (AllOptionsMenu's scripts show and hide
-   it by name) and runs Controls' action, PushMenu ControlsMenu.  AllOptionsMenu's event handler (0x24b484,
-   found in its vtable at start) would open Customer Care for a press on btnCustomSupport: here such a press
-   goes to the menus' common handler only (0x2589a0, as any other control) and marks the next ControlsMenu
-   as the Display page.  pcctl.c (which owns ControlsMenu) then shows only its PCDisplay page
-   (swfpatch_controls.py): seven rows, a note and a Restart button.
-
-   The rows (each < value >; the choice is written to gtracing.ini at once, GT_INI for tests):
-     Resolution      GT_RESOLUTION  Device / 720p / 1080p / 1440p / 2160p / Auto (=monitor)   next start
-     Aspect Ratio    GT_WIDE        4:3 / 16:10 / 16:9 / 21:9 / Auto (=monitor, WIDE_UI)  next start
-     Full Screen     GT_FULLSCREEN  Off / On                                           at once
-     Anti-aliasing   GT_MSAA        Off / 2x / 4x / 8x (up to the driver's most)        at once
-     Anisotropic     GT_ANISOTROPIC Off / 2x / 4x / 8x / 16x                           at once
-     Motion Blur     GT_FULL_BLUR   Auto / Full / Light (fullblur.c)                   at once
-     PostFX          GT_POSTFX      Off (0: none, as shipped) / Classic (2) / Classic Natural (3) /
-                                    Enhanced (4, the default: the game's own, balanced, + Classic Natural),
-                                    postfx.c                                           at once
-   GPU_PROFILE (optimisation pass 5, gpuprofile.c): Anti-aliasing has Auto too (GT_MSAA=auto: 4x on any GPU),
-   and the sixth row chooses the motion
-   blur: Full (the iPad 2's, FULL_BLUR), Light (the iPad 3's: a target 0.65x the screen), Auto (Light on a built-in
-   GPU, Full on a graphics card; shown with what it chose).  The blur's shader takes its lighter variant from a host
-   uniform and its target is given the new size at the frame's end (fullblur.c), so the row takes effect at once.
-   PostFX: the game's own bloom's targets are made whatever the mode (postfx.c), so every value takes effect at once.
-   Full Screen (FULL_SCREEN, a saved full screen option; the iPad has no window, so the game has no such option):
-   the row and Alt+Enter both write GT_FULLSCREEN (1 on, 0 or blank a window) and uikit.c's make_window opens the
-   window full screen when it is 1, so the choice holds at the next start.  Full screen is SDL's desktop full screen (no mode change: the picture is drawn at the monitor's
-   size, black bands where the shapes differ).  The window is switched on the main thread (ui_pump): the
-   menus run on the game thread, so a press there only asks for it.
-   The first two are read before the game starts and kept by the game's own code (read from it):
-   - the screen's size in pixels: F_2ff958 (UIScreen's bounds x the scale it keeps at 0x774160) into 0x7711bc /
-     0x7711c0, by F_12dd00 / F_12de40; the post effect object (F_14ba30, made once) and its render targets
-     (F_2a46c0: the bloom's at the screen's size; F_2a4cfc's) are made at that size;
-   - the 3D picture's shape: the renderer's constructor (F_14bb8c) divides the width by the height once and keeps
-     it (+0x11fc), the projection's aspect;
-   - the drawable: the game's view gives the renderbuffer its storage once (renderbufferStorage:fromDrawable:,
-     eagl.c) and makes its depth buffer at that size;
-   - the screen's shape in points (GT_WIDE): UIScreen's bounds, the views' frames, gameswf's stage and WIDE_UI's
-     offset (uikit.c ui_stage_dx) are set as the game starts; touches are mapped with them.
-   So a change shows "Restart to Apply" (in the note's place), which starts the game again (the new run waits for this one to end,
-   main.c GT_WAIT_PID) after a normal end (save, as when the window is closed).
-   GT_DISPLAY_MENU=0: the tile stays Customer Care's handler (the picture is still the patched one). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
+#ifndef _WIN32
+#include <spawn.h>
+extern char **environ;
+#endif
 
 #include "features.h"
 #include "game.h"
 
-#define AOM_EVENT_FN 0x24b484u        /* AllOptionsMenu's event handler (its vtable +0x2c) */
+#define AOM_EVENT_FN 0x24b484u
 #define SWF_VISIBLE 0xab
 
 int glx_msaa_now(void);
@@ -65,23 +21,16 @@ void glx_set_msaa(int n);
 void glx_set_aniso(float n);
 
 typedef struct { const char *label, *value; } Opt;
-/* "Device" and "4:3" are written as 0 and 1024: a blank value means the default
-   (main.c default_settings: monitor), so a blank could no longer choose them */
 static const Opt res_opts[] = {{"Device", "0"}, {"720p", "720"}, {"1080p", "1080"}, {"1440p", "1440"},
                                {"2160p", "2160"}, {"Auto", "monitor"}};
-/* "Auto" on screen; the ini value stays "monitor" */
 static const Opt wide_opts[] = {{"4:3 (iPad)", "1024"}, {"16:10", "1229"}, {"16:9", "1366"}, {"21:9", "1792"},
                                 {"Auto", "monitor"}};
 #define NRES ((int)(sizeof res_opts / sizeof res_opts[0]))
 #define NWIDE ((int)(sizeof wide_opts / sizeof wide_opts[0]))
 static const int aa_opts[] = {0, 2, 4, 8};
 static const int af_opts[] = {1, 2, 4, 8, 16};
-/* GPU_PROFILE (gpuprofile.c, fullblur.c) */
 static const Opt blur_opts[] = {{"Auto", "auto"}, {"Full", "1"}, {"Light", "0"}};
 #define NBLUR 3
-/* PostFX (POSTFX, postfx.c): the free iPad build's (none, as shipped), the paid iPad 2010 build's, or that with the
-   world's colours kept, or Enhanced (the game's own bloom balanced, with Classic Natural over it); GT_POSTFX=1 (the
-   game's own, set in the file) shows as such until the row is changed */
 static const Opt postfx_opts[] = {{"Off", "0"}, {"Classic", "2"}, {"Classic Natural", "3"}, {"Enhanced", "4"}};
 #define NPOSTFX 4
 static const char *postfx_text(void)
@@ -89,14 +38,13 @@ static const char *postfx_text(void)
     int m = gt_postfx_wanted();
     return m == 4 ? "Enhanced" : m == 3 ? "Classic Natural" : m == 2 ? "Classic" : m == 1 ? "Game's own" : "Off";
 }
-/* FULL_BLUR (fullblur.c) */
 
 static int on = -1;
-static int aa_auto;                   /* GT_MSAA is auto (the Anti-aliasing row's fifth value) */
+static int aa_auto;
 static int blur_sel = 0;
-static int res_run = -1, res_sel = -1, wide_run = -1, wide_sel = -1;   /* -1: a value not in the list */
+static int res_run = -1, res_sel = -1, wide_run = -1, wide_sel = -1;
 static char res_custom[32], wide_custom[32];
-static u32 pressed_at;                /* the frame the Display tile was pressed (0 none) */
+static u32 pressed_at;
 
 static int find_opt(const Opt *o, int n, const char *v)
 {
@@ -108,9 +56,6 @@ static int find_opt(const Opt *o, int n, const char *v)
     return -1;
 }
 
-/* gtracing.ini */
-/* KEY=value replaces the key's line (the first not commented out), or goes at the end with a comment.
-   Called from the game thread (the page) and the main thread (Alt+Enter): one at a time */
 static SRWLOCK ini_lock = SRWLOCK_INIT;
 static void ini_set_locked(const char *key, const char *value, const char *comment);
 static void ini_set(const char *key, const char *value, const char *comment)
@@ -165,8 +110,7 @@ static void ini_set_locked(const char *key, const char *value, const char *comme
     rt_log("[display] %s: %s=%s\n", path, key, value);
 }
 
-/* full screen */
-static volatile LONG fs_want = -1;    /* asked for from the game thread, done by ui_pump: -1 nothing, 0 / 1 */
+static volatile LONG fs_want = -1;
 
 static int fs_now(void)
 {
@@ -176,7 +120,6 @@ static int fs_now(void)
     return ui_window && (SDL_GetWindowFlags(ui_window) & SDL_WINDOW_FULLSCREEN) ? 1 : 0;
 }
 
-/* the row or Alt+Enter: remembered in gtracing.ini, the window switched now (on the main thread) */
 static void display_fullscreen(int fs)
 {
     fs = fs ? 1 : 0;
@@ -191,7 +134,6 @@ static void display_fullscreen(int fs)
 
 void display_fullscreen_toggle(void) { display_fullscreen(!fs_now()); }
 
-/* ui_pump (main thread): a switch asked for from the page */
 void display_fullscreen_pump(void)
 {
     LONG w = InterlockedExchange(&fs_want, -1);
@@ -199,7 +141,6 @@ void display_fullscreen_pump(void)
         SDL_SetWindowFullscreen(ui_window, w != 0);
 }
 
-/* the page */
 static u32 find(u32 pl, const char *path) { return rt_call2(GT_FN_SWF_FIND, pl, GA((void *)path)); }
 
 static void set_text(u32 pl, const char *path, const char *text)
@@ -212,7 +153,6 @@ static void set_text(u32 pl, const char *path, const char *text)
 
 static int pending(void) { return res_sel != res_run || wide_sel != wide_run; }
 
-/* the Motion Blur row's text: Auto shows what it chose */
 static const char *blur_text(char *t, size_t n)
 {
     if (blur_sel == 0)
@@ -222,7 +162,6 @@ static const char *blur_text(char *t, size_t n)
     return t;
 }
 
-/* the Anti-aliasing row's text */
 static const char *aa_text(char *t, size_t n, int aa)
 {
     if (aa_auto)
@@ -253,7 +192,7 @@ static int af_index(void)
     return best;
 }
 
-static int fs_shown = -1;             /* the Full Screen row's value as shown (Alt+Enter changes it too) */
+static int fs_shown = -1;
 
 static void values(u32 pl)
 {
@@ -277,8 +216,6 @@ static void values(u32 pl)
         snprintf(t, sizeof t, "%dx", af);
     set_text(pl, "Sel5.txtSelectorType", af > 1 ? t : "Off");
     set_text(pl, "Sel7.txtSelectorType", postfx_text());
-    /* one line (the main menus' text field wraps longer ones); while a restart waits, the Restart button
-       takes the note's place (display_menu_layout) */
     set_text(pl, "Note", "All but Resolution and Aspect Ratio: at once");
 }
 
@@ -288,7 +225,7 @@ void display_menu_fill(u32 pl)
     set_text(pl, "Title2.typefield", "Aspect Ratio:");
     set_text(pl, "Title3.typefield", "Full Screen:");
     set_text(pl, "Title4.typefield", "Anti-aliasing:");
-    set_text(pl, "Title5.typefield", "Anisotropic:");     /* "... Filtering" takes two lines */
+    set_text(pl, "Title5.typefield", "Anisotropic:");
     set_text(pl, "Title6.typefield", "Motion Blur:");
     set_text(pl, "Title7.typefield", "PostFX:");
     set_text(pl, "CellRestart.txtKey", "Restart to Apply");
@@ -299,8 +236,6 @@ void display_menu_fill(u32 pl)
     values(pl);
 }
 
-/* every frame the page shows: Restart only with a change waiting for it, the note otherwise (one line
-   holds either, swfpatch_controls.py) */
 void display_menu_layout(u32 pl)
 {
     u32 r = find(pl, "ControlsMenu.PCDisplay.CellRestart");
@@ -309,7 +244,7 @@ void display_menu_layout(u32 pl)
     u32 n = find(pl, "ControlsMenu.PCDisplay.Note");
     if (n && *(volatile u8 *)GP(n + SWF_VISIBLE) != (u8)!pending())
         *(volatile u8 *)GP(n + SWF_VISIBLE) = (u8)!pending();
-    int fs = fs_now();                  /* Alt+Enter while the page shows */
+    int fs = fs_now();
     if (fs != fs_shown) {
         fs_shown = fs;
         set_text(pl, "Sel3.txtSelectorType", fs ? "On" : "Off");
@@ -321,8 +256,7 @@ static void restart(void)
     char exe[MAX_PATH], cwd[MAX_PATH], pid[16];
     GetModuleFileNameA(NULL, exe, sizeof exe);
     GetCurrentDirectoryA(sizeof cwd, cwd);
-    gt_ini_forget_env();                /* the new run reads gtracing.ini afresh */
-    /* and the two rows' choices win over a value set outside the file (a .bat, a test) */
+    gt_ini_forget_env();
     _putenv_s("GT_RESOLUTION", res_sel >= 0 ? res_opts[res_sel].value : res_custom);
     _putenv_s("GT_WIDE", wide_sel >= 0 ? wide_opts[wide_sel].value : wide_custom);
     _putenv_s("GT_FULLSCREEN", fs_now() ? "1" : "0");
@@ -330,12 +264,12 @@ static void restart(void)
     char bm[4];
     snprintf(bm, sizeof bm, "%d", gt_postfx_wanted());
     _putenv_s("GT_POSTFX", bm);
-    /* a test run's scripted input is not played again by the new run */
     static const char *const scripted[] = {"GT_TAPS", "GT_KEYNAV", "GT_PADNAV", "GT_PEDALS", "GT_PAUSE", NULL};
     for (int i = 0; GT_DEV && scripted[i]; i++)
         _putenv_s(scripted[i], "");
     snprintf(pid, sizeof pid, "%lu", GetCurrentProcessId());
     _putenv_s("GT_WAIT_PID", pid);
+#ifdef _WIN32
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si);
@@ -349,10 +283,30 @@ static void restart(void)
     } else
         rt_log("[display] restart: CreateProcess failed (%lu)\n", GetLastError());
     free(cmd);
+#else
+    static char line[8192];
+    char *argv[64];
+    int argc = 0;
+    FILE *f = fopen("/proc/self/cmdline", "rb");
+    size_t n = f ? fread(line, 1, sizeof line - 1, f) : 0;
+    if (f)
+        fclose(f);
+    line[n] = 0;
+    for (size_t i = 0; i < n && argc < 63; i += strlen(line + i) + 1)
+        argv[argc++] = line + i;
+    argv[argc] = NULL;
+    pid_t child;
+    int e = argc ? posix_spawn(&child, exe, NULL, NULL, argv, environ) : ENOENT;
+    if (!e) {
+        rt_log("[display] restart: new run %d, this one ends\n", (int)child);
+        ui_quit = 1;
+    } else
+        rt_log("[display] restart: posix_spawn failed (%d)\n", e);
+    (void)cwd;
+#endif
     _putenv_s("GT_WAIT_PID", "");
 }
 
-/* a click on the page (released on it); ps: the control's path */
 void display_menu_click(u32 pl, const char *ps)
 {
     if (strstr(ps, "PCDisplay.CellRestart")) {
@@ -376,13 +330,12 @@ void display_menu_click(u32 pl, const char *ps)
         ini_set("GT_WIDE", wide_opts[wide_sel].value,
                 "the screen's shape: 1024 4:3, 1229 16:10, 1366 16:9, 1792 21:9, monitor (Options > Display)");
     } else if (row == 3) {
-        int fs = !fs_now();             /* two values: either arrow switches */
+        int fs = !fs_now();
         display_fullscreen(fs);
         fs_shown = fs;
         set_text(pl, "Sel3.txtSelectorType", fs ? "On" : "Off");
         return;
     } else if (row == 4) {
-        /* the values Off, 2x, 4x, 8x (up to the driver's most), then Auto (GPU_PROFILE) */
         int n = 4, mx = glx_msaa_max();
         while (n > 1 && mx && aa_opts[n - 1] > mx)
             n--;
@@ -396,7 +349,6 @@ void display_menu_click(u32 pl, const char *ps)
         char v[8];
         snprintf(v, sizeof v, "%d", samples);
         ini_set("GT_MSAA", aa_auto ? "auto" : v, "anti-aliasing samples: 0 off, 2, 4, 8, auto (Options > Display)");
-        /* the menu shows the new value at once; the renderer takes it at the frame's end */
         char t[24];
         set_text(pl, "Sel4.txtSelectorType", aa_text(t, sizeof t, samples));
         rt_log("[display] anti-aliasing %s\n", t);
@@ -428,7 +380,7 @@ void display_menu_click(u32 pl, const char *ps)
         return;
     } else if (row == 7) {
         int m = gt_postfx_wanted();
-        int i = m == 4 ? 3 : m == 3 ? 2 : m == 2 ? 1 : 0;   /* the game's own (1) counts as Off: either arrow leaves it */
+        int i = m == 4 ? 3 : m == 3 ? 2 : m == 2 ? 1 : 0;
         if (m != 1)
             i = (i + dir + NPOSTFX) % NPOSTFX;
         gt_postfx_set(atoi(postfx_opts[i].value));
@@ -443,10 +395,6 @@ void display_menu_click(u32 pl, const char *ps)
     display_menu_layout(pl);
 }
 
-/* the frame's end */
-/* GT_TEST_DISPLAY="frame:postfx=N;frame:blur=V;..." (testing; ";" or "," between): the PostFX and Motion Blur
-   rows' changes at those frames, as the rows make them (the ini is not written), so a scripted race can switch
-   them while it runs */
 static struct { u32 frame; char what; char value[8]; } tests[32];
 static int ntests = -1, next_test;
 
@@ -470,7 +418,6 @@ static void test_parse(void)
         dev_log("[display] test: %d change%s (GT_TEST_DISPLAY)\n", ntests, ntests > 1 ? "s" : "");
 }
 
-/* eagl.c, after each present (the game thread, its GL context current; the GL state cache is forgotten after) */
 void gt_frame_end(void)
 {
     if (ntests < 0)
@@ -491,12 +438,8 @@ void gt_frame_end(void)
     fullblur_frame_end();
 }
 
-/* the tile */
 static void (*aom_event_fn)(CPU *), (*aom_update_fn)(CPU *);
 
-/* AllOptionsMenu's update (vtable +0x1c): the tile's name, which the game sets ("Customer Care", in the
-   player's language) when the menu shows; put back every half second (set_text returns early when the
-   text is the same, 0x4fde00) */
 static void aom_update_hook(CPU *c)
 {
     u32 self = c->r[0];
@@ -521,7 +464,7 @@ static void aom_event_hook(CPU *c)
         pressed_at = eagl_frames();
         if (rd32(ev + 8) == 2)
             rt_log("[display] the Display tile (frame %u)\n", pressed_at);
-        rt_call2(GT_FN_MENU_BASE_EVENT, self, ev);   /* not Customer Care */
+        rt_call2(GT_FN_MENU_BASE_EVENT, self, ev);
         return;
     }
     if (!strncmp(name, "btn", 3))
@@ -529,10 +472,8 @@ static void aom_event_hook(CPU *c)
     aom_event_fn(c);
 }
 
-/* GT_TEST_MENU=frame:DisplayMenu (menu3d.c, testing): as if the tile had been pressed */
 void display_test_page(void) { pressed_at = eagl_frames(); }
 
-/* pcctl.c, as ControlsMenu is entered: 1 = it is the Display page (the tile was pressed just now) */
 int display_take_page(void)
 {
     int page = on > 0 && pressed_at && eagl_frames() - pressed_at < 240;
@@ -554,7 +495,6 @@ void display_init(void)
         rt_log("[display] off (GT_DISPLAY_MENU=0)\n");
         return;
     }
-    /* AllOptionsMenu's vtable: the data word holding its event handler */
     u32 slot = 0;
     for (u32 a = 0x780000u; a < 0x7a0000u; a += 4)
         if (rd32(a) == AOM_EVENT_FN) {
@@ -569,7 +509,7 @@ void display_init(void)
     }
     gt_unprotect(slot, 4);
     wr32(slot, rt_host_addr(aom_event_hook, "display aom_event_hook"));
-    u32 upd = slot - GT_VT_EVENT + GT_VT_UPDATE;    /* the same vtable's update */
+    u32 upd = slot - GT_VT_EVENT + GT_VT_UPDATE;
     if (!gt_hook_slot(upd, rd32(upd), &aom_update_fn, aom_update_hook, "display aom_update_hook"))
         rt_log("[display] AllOptionsMenu's update unknown: the tile keeps its name\n");
     rt_log("[display] Display menu on (AllOptionsMenu handler at 0x%x); resolution %s, aspect %s\n", slot,

@@ -1,18 +1,7 @@
-/* objc.c -- Objective-C 2 runtime for the recompiled game (see objc.h).
-
-   Guest structures (armv7, clang's ObjC 2 ABI, 32-bit):
-     class_t      isa, superclass, cache, vtable, data (-> class_ro_t)            20 bytes
-     class_ro_t   flags, instanceStart, instanceSize, ivarLayout, name, baseMethods,
-                  baseProtocols, ivars, weakIvarLayout, baseProperties
-     method_list  entsize|flags, count, then method_t {name (SEL), types, imp}
-     ivar_list    entsize, count, then ivar_t {offset *, name, type, alignment, size}
-     category_t   name, cls, instanceMethods, classMethods, protocols, instanceProperties
-   Host classes (UIKit, Foundation...) get class_t / class_ro_t made the same way.  Retain counts
-   live in a side table (as on 32-bit iOS), autorelease pools per thread. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "abi.h"
 #include "hmap.h"
@@ -21,22 +10,22 @@
 #include "objc.h"
 
 struct ObjcClass {
-    u32 addr;                  /* class_t */
+    u32 addr;
     const char *name;
     ObjcClass *super;
-    ObjcClass *meta;           /* class: its metaclass */
-    ObjcClass *nonmeta;        /* metaclass: its class */
+    ObjcClass *meta;
+    ObjcClass *nonmeta;
     int is_meta, host, init_state;
-    u32 size;                  /* instance size */
+    u32 size;
     u32 ro;
-    Map32 methods;             /* SEL -> method_t address */
-    Map32 cache;               /* SEL -> IMP (inherited too; 1 = known missing) */
+    Map32 methods;
+    Map32 cache;
 };
 
 static CRITICAL_SECTION lock;
-static Map32 by_addr;          /* class_t address -> ObjcClass * */
-static MapStr by_name;         /* class name -> ObjcClass * (classes only) */
-static MapStr sels;            /* name -> SEL */
+static Map32 by_addr;
+static MapStr by_name;
+static MapStr sels;
 static ObjcClass **all;
 static unsigned nall, capall;
 static int strict;
@@ -44,8 +33,6 @@ static int strict;
 static u32 empty_cache[4], empty_vtable[16];
 
 #define MISS 1u
-
-/* selectors */
 
 static SEL sel_intern(const char *name, u32 prefer)
 {
@@ -69,8 +56,6 @@ SEL sel_get(const char *name)
 }
 
 const char *sel_name(SEL s) { return s ? (const char *)GP(s) : "(null)"; }
-
-/* classes */
 
 static ObjcClass *new_class(u32 addr, const char *name, int is_meta)
 {
@@ -149,7 +134,6 @@ u32 objc_instance_size(u32 cls)
     return k ? k->size : 0;
 }
 
-/* Superclasses of the classes the host provides (unlisted: NSObject). */
 static const char *const host_supers[][2] = {
     {"UIResponder", "NSObject"}, {"UIView", "UIResponder"}, {"UIViewController", "UIResponder"},
     {"UIApplication", "UIResponder"}, {"UIWindow", "UIView"}, {"UIControl", "UIView"},
@@ -208,7 +192,7 @@ static ObjcClass *host_class_locked(const char *name)
     ObjcClass *root = s ? s : k;
     while (root->super)
         root = root->super;
-    m->super = s ? s->meta : k;           /* the root metaclass inherits from the root class */
+    m->super = s ? s->meta : k;
     cls[0] = GA(meta);
     cls[1] = s ? s->addr : 0;
     cls[2] = GA(empty_cache);
@@ -219,10 +203,10 @@ static ObjcClass *host_class_locked(const char *name)
     meta[2] = GA(empty_cache);
     meta[3] = GA(empty_vtable);
     meta[4] = GA(mro);
-    ro[0] = s ? 0 : 2;                     /* RO_ROOT */
+    ro[0] = s ? 0 : 2;
     ro[1] = ro[2] = k->size;
     ro[4] = GA(nm);
-    mro[0] = 1 | (s ? 0 : 2);              /* RO_META */
+    mro[0] = 1 | (s ? 0 : 2);
     mro[1] = mro[2] = 20;
     mro[4] = GA(nm);
     return k;
@@ -242,7 +226,6 @@ static void flush_caches(void)
         m32_clear(&all[i]->cache);
 }
 
-/* method_t records for host methods (the game may ask for Method pointers). */
 static u32 make_method(SEL sel, u32 imp, const char *types)
 {
     u32 *m = calloc(3, 4);
@@ -267,8 +250,6 @@ void objc_add_method(const char *cls, const char *sel, ObjcHostIMP fn, int class
     LeaveCriticalSection(&lock);
 }
 
-/* the game's image */
-
 static void add_method_list(ObjcClass *k, u32 list)
 {
     if (!list)
@@ -279,7 +260,7 @@ static void add_method_list(ObjcClass *k, u32 list)
     for (u32 i = 0; i < count; i++) {
         u32 m = list + 8 + i * entsize;
         SEL s = sel_intern((const char *)GP(rd32(m)), rd32(m));
-        wr32(m, s);                        /* method_getName sees the canonical selector */
+        wr32(m, s);
         m32_put(&k->methods, s, m);
     }
 }
@@ -316,15 +297,13 @@ static ObjcClass *realize(u32 addr)
     if (sup) {
         s = objc_class_at(sup);
         if (!s)
-            s = realize(sup);              /* a game class later in the list */
+            s = realize(sup);
     }
     k = new_class(addr, name, 0);
     k->ro = ro;
     k->super = s;
-    /* non-fragile ivars: slide if the superclass is bigger than the compiler thought */
     u32 start = rd32(ro + 4), size = rd32(ro + 8);
     if (s && s->size > start) {
-        /* objc4's moveIvars: the slide keeps the largest ivar alignment of the class */
         u32 delta = s->size - start, iv = rd32(ro + 28), align = 1;
         u32 es = iv ? rd32(iv) : 0, n = iv ? rd32(iv + 4) : 0;
         for (u32 i = 0; i < n; i++) {
@@ -352,7 +331,6 @@ static ObjcClass *realize(u32 addr)
 
 static u32 n_classes, n_cats, n_sels;
 
-/* The image's classes, categories and selector references (after binding). */
 void gt_objc_image(void)
 {
     const macho *M = gt_macho();
@@ -363,8 +341,6 @@ void gt_objc_image(void)
         wr32(a, sel_intern((const char *)GP(p), p));
         n_sels++;
     }
-    /* host class sizes: what the game's subclasses were compiled against (the smallest first-ivar
-       offset: a subclass whose first ivar needs 4-byte alignment starts after padding) */
     s = macho_sect_named(M, "__DATA", "__objc_classlist");
     Map32 minstart = {0};
     for (u32 a = s ? s->addr : 0; s && a < s->addr + s->size; a += 4) {
@@ -381,7 +357,7 @@ void gt_objc_image(void)
         if (m32_get(&minstart, all[i]->addr, &v) && v > all[i]->size)
             all[i]->size = v;
     }
-    for (unsigned i = 0; i < nall; i++)    /* a host class is at least as big as its superclass */
+    for (unsigned i = 0; i < nall; i++)
         for (ObjcClass *k = all[i]; k->host && !k->is_meta && k->super; k = k->super)
             if (k->super->size > k->size)
                 k->size = k->super->size;
@@ -407,7 +383,6 @@ void gt_objc_image(void)
            "%u selectors\n", n_classes, n_slid, n_cats, n_sels, sels.n);
 }
 
-/* +load of every class (superclasses first) and category, as the runtime does at image load. */
 void gt_objc_load(void)
 {
     const macho *M = gt_macho();
@@ -438,8 +413,6 @@ void gt_objc_load(void)
         }
     }
 }
-
-/* lookup and messaging */
 
 static void initialize(ObjcClass *k);
 
@@ -490,7 +463,6 @@ static void initialize(ObjcClass *k)
     c->init_state = 2;
 }
 
-/* The IMP for a message to receiver class cls, +initialize first. */
 static u32 send_lookup(u32 cls, SEL sel)
 {
     ObjcClass *k = objc_class_at(cls);
@@ -559,7 +531,6 @@ void I_objc_msgSend_stret(CPU *c)
     rt_call_indirect(c, imp);
 }
 
-/* struct objc_super { id receiver; Class current_class; }: lookup starts at its superclass. */
 void I_objc_msgSendSuper2(CPU *c)
 {
     u32 sup = c->r[0], self = rd32(sup), cls = objc_super_addr(rd32(sup + 4));
@@ -619,9 +590,7 @@ int objc_responds(id self, const char *sel)
     return self && objc_lookup(rd32(self), sel_get(sel)) != 0;
 }
 
-/* objects, retain counts, autorelease pools */
-
-static Map32 extra_rc;         /* object -> retain count - 1 */
+static Map32 extra_rc;
 static CRITICAL_SECTION rc_lock;
 
 id objc_alloc_instance(u32 cls, u32 extra)
@@ -717,13 +686,9 @@ void objc_pool_pop(u32 mark)
         objc_release(p->objs[--p->n]);
 }
 
-/* NSObject (the root class), NSAutoreleasePool */
-
 #define SELF c->r[0]
 #define ARG(i) arg_word(c, 2 + (i))
 
-/* +alloc goes through +allocWithZone: as in Apple's runtime: singletons override that one to keep
-   their instance (GLiveViewController, the ad SDKs' managers) */
 static u32 alloc_imp;
 static void m_allocWithZone(CPU *c) { ret_i(c, objc_alloc_instance(SELF, 0)); }
 static void m_alloc(CPU *c)
@@ -766,7 +731,6 @@ static void m_isSubclassOfClass(CPU *c)
 static void m_conformsToProtocol(CPU *c) { ret_i(c, 0); }
 static void m_performSelector(CPU *c)
 {
-    /* -performSelector:(SEL) [withObject: [withObject:]]: the same message with the arguments moved down */
     id self = SELF;
     SEL s = c->r[2];
     u32 imp = send_lookup(rd32(self), s);
@@ -789,9 +753,7 @@ static void m_pool_drain(CPU *c)
 }
 static void m_pool_add_c(CPU *c) { objc_autorelease(ARG(0)); }
 
-/* runtime functions the game imports */
-
-static Map32 sync_locks;       /* object -> CRITICAL_SECTION * (recursive, as @synchronized) */
+static Map32 sync_locks;
 
 u32 h_objc_sync_enter(u32 obj)
 {
@@ -829,7 +791,6 @@ u32 h_sel_getName(u32 sel) { return sel ? sel : GA("<null selector>"); }
 u32 h_sel_registerName(u32 name) { return sel_get(GP(name)); }
 u32 h_objc_lookUpClass(u32 name) { return objc_getClass_addr(GP(name)); }
 
-/* method_t of sel in cls or its superclasses */
 static u32 method_record(u32 cls, SEL sel)
 {
     ObjcClass *k = objc_class_at(cls);
@@ -893,7 +854,6 @@ u32 h_class_copyMethodList(u32 cls, u32 out_count)
     }
     return GA(list);
 }
-/* property_list_t {entsize, count, property_t {name, attributes}} in class_ro_t +36 */
 static u32 prop_list(u32 cls)
 {
     ObjcClass *k = objc_class_at(cls);
@@ -922,7 +882,6 @@ u32 h_class_getProperty(u32 cls, u32 name)
     }
     return 0;
 }
-/* objc_property_t: {const char *name, const char *attributes} in the class's property list */
 u32 h_property_getName(u32 p) { return p ? rd32(p) : 0; }
 u32 h_property_getAttributes(u32 p) { return p ? rd32(p + 4) : 0; }
 
@@ -969,8 +928,6 @@ u32 h_objc_getClassList(u32 buf, u32 count)
     return n;
 }
 
-/* Host state lives inside host objects (UIView, CALayer...): the class gets at least `bytes`;
-   the game's subclasses' ivars slide past it when the image is realized.  Call before gt_load. */
 void objc_host_size(const char *name, u32 bytes)
 {
     ObjcClass *k = objc_host_class(name);
@@ -981,7 +938,6 @@ void objc_host_size(const char *name, u32 bytes)
     }
 }
 
-/* --objc-dump: every class with game methods (game classes and game categories on host ones). */
 static int cmp_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
 void gt_objc_dump(FILE *f)
 {
@@ -1040,8 +996,6 @@ void gt_objc_init(void)
     for (int i = 0; root[i].sel; i++)
         objc_add_method("NSObject", root[i].sel, root[i].fn, root[i].cls);
     alloc_imp = objc_lookup(objc_host_class("NSObject")->meta->addr, sel_get("allocWithZone:"));
-    /* class objects answer instance methods of the root class too (metaclass chain), so -retain
-       etc. on a class work; +class above returns self. */
     ObjcClass *pool_cls = objc_host_class("NSAutoreleasePool");
     if (pool_cls->size < 8)
         pool_cls->size = 8;
@@ -1050,8 +1004,6 @@ void gt_objc_init(void)
     objc_add_method("NSAutoreleasePool", "release", m_pool_drain, 0);
     objc_add_method("NSAutoreleasePool", "addObject:", m_pool_add_c, 1);
 }
-
-/* data the Objective-C side provides */
 
 typedef struct { u32 vtable, name, cls; } EhType;
 static u32 eh_vtable[4];

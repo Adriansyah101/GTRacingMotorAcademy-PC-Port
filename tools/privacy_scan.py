@@ -1,23 +1,25 @@
-"""Privacy scan: the files given must not name this PC, its Windows user or the folders they are in.
+"""Privacy scan: the files given must not name this PC, its user or the folders they are in.
 
 usage: python -I tools/privacy_scan.py [--quiet] [--release] FILE_OR_FOLDER...
 
-Each file (a folder: every file in it; a .zip: every file in it too) is searched, any case, in UTF-8, the ANSI code
-page and UTF-16LE, for:
-  - the Windows user's name (USERNAME), the PC's name (COMPUTERNAME and the network host name) and the Windows
-    user's folder (USERPROFILE);
+Each file (a folder: every file in it; a .zip or .tar.gz: every file in it too) is searched, any case, in UTF-8,
+the ANSI code page and UTF-16LE, for:
+  - the user's name (USERNAME, USER, LOGNAME), the PC's name (COMPUTERNAME and the network host name) and the
+    user's folder (USERPROFILE, HOME);
   - the name and e-mail address Git commits with on this PC (git config user.name / user.email), when Git is there;
   - "C:\\Users" (either slash);
   - the project's folder, and each folder name on its path that is not a generic one (Users, Documents ...).
 These are read when the scan runs and are never written anywhere.  The project's public repository name,
-<its owner>/GTRacingMotorAcademyRecomp (in GitHub and badge addresses of the README and the release notes), is
-allowed.  A hit prints the file, the encoding and the count, with the string masked (its first letter, then one * per letter), so the output itself names nothing; the
-exit code is then 1.
+<its owner>/GTRacingMotorAcademy-PC-Port (in GitHub and badge addresses of the documents), the owner's profile
+link ([<owner>](https://github.com/<owner>)) and the licence's "Copyright (c) 2026 <owner>" line are allowed.  A
+hit prints the file, the encoding and the count, with the string masked (its first letter, then one * per
+letter), so the output itself names nothing; the exit code is then 1.
 
---release adds what a release is made of: tools/release/ (README.txt, IMPORTANT.TXT, the gtracing.ini template, the
-empty folders' notes) and, in build/release/, each release folder, its zip and the release notes.  Left out there:
-...-PRIVATE folders (they hold Gameloft's menu files and are never shared), symbols/ (the linker maps, which name
-the build's folders by design and stay out of the release) and old/.
+--release adds what a release is made of: tools/release/ (the README.txt templates, IMPORTANT.TXT, the
+gtracing.ini template, the empty folders' notes) and, in build/release/, each release folder, its zip or tar.gz
+and the release notes.  Left out there: ...-PRIVATE folders (they hold Gameloft's menu files and are never
+shared), symbols/ (the linker maps, which name the build's folders by design and stay out of the release) and
+old/.
 
 Used by tools/playtest.ps1 (both builds' exes, unstripped, the minidump and log of a forced crash, and --release) and
 by tools/package_release.py (every file of the release, and the log of its check run).
@@ -26,11 +28,12 @@ import os
 import socket
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-REPO = 'GTRacingMotorAcademyRecomp'     # the project's public repository: <Git user.name>/<REPO> on GitHub
+REPO = 'GTRacingMotorAcademy-PC-Port'
 GENERIC = {'users', 'documents', 'desktop', 'downloads', 'onedrive', 'appdata', 'program files', 'home', 'build'}
 
 
@@ -43,22 +46,23 @@ def git_config(key):
 
 
 def public_forms():
-    """what may hold a private word and is public by design: the project's repository name (its owner's name)"""
     owner = git_config('user.name')
-    return ['%s/%s' % (owner, REPO)] if len(owner) >= 3 else []
+    if len(owner) < 3:
+        return []
+    return ['%s/%s' % (owner, REPO), '[%s](https://github.com/%s)' % (owner, owner),
+            'Copyright (c) 2026 %s' % owner]
 
 
 def private_words():
-    """the strings no shipped file, log or dump may hold"""
     words = {'C:\\Users'}
-    found = [os.environ.get(k, '') for k in ('USERNAME', 'COMPUTERNAME', 'USERPROFILE')]
+    found = [os.environ.get(k, '') for k in ('USERNAME', 'COMPUTERNAME', 'USERPROFILE', 'USER', 'LOGNAME', 'HOME')]
     try:
         found.append(socket.gethostname())
     except OSError:
         pass
     found += [git_config('user.name'), git_config('user.email')]
     for v in found:
-        if len(v) >= 3:
+        if len(v) >= 3 and v.strip('/\\'):
             words.add(v)
     words.add(ROOT)
     for p in os.path.normpath(ROOT).split(os.sep)[1:]:
@@ -83,8 +87,6 @@ PUBLIC = None
 
 
 def scan_bytes(data, words):
-    """[(word, encoding, count)] of every word found, any case, 8-bit (UTF-8 and the ANSI code page) and UTF-16LE;
-    the public forms (public_forms) are taken out first"""
     global PUBLIC
     if PUBLIC is None:
         PUBLIC = [needle for f in public_forms() for _, needle in encodings(f)]
@@ -101,7 +103,6 @@ def scan_bytes(data, words):
 
 
 def mask(w):
-    """a private word as printed: its first letter and its length"""
     return w[:1] + '*' * (len(w) - 1)
 
 
@@ -116,18 +117,22 @@ def files_of(paths):
 
 
 def contents(f):
-    """[(name, bytes)]: the file itself, and each member of a .zip (stored compressed, so not seen in its bytes)"""
     with open(f, 'rb') as fp:
         data = fp.read()
     out = [(f, data)]
     if f.lower().endswith('.zip'):
         with zipfile.ZipFile(f) as z:
             out += [(f + '!' + i.filename, z.read(i)) for i in z.infolist() if not i.is_dir()]
+    elif f.lower().endswith(('.tar.gz', '.tgz')):
+        with tarfile.open(f, 'r:gz') as t:
+            for m in t.getmembers():
+                out.append((f + '!' + m.name + ' (owner)', ('%s %s' % (m.uname, m.gname)).encode()))
+                if m.isfile():
+                    out.append((f + '!' + m.name, t.extractfile(m).read()))
     return out
 
 
 def scan_paths(paths, words, base=None):
-    """['<file>: "<masked>" (<encoding>) x<count>', ...] for every hit in the files of paths"""
     bad = []
     for f in files_of(paths):
         for name, data in contents(f):
@@ -137,7 +142,6 @@ def scan_paths(paths, words, base=None):
 
 
 def release_paths():
-    """tools/release/ and the shippable part of build/release/ (see the module's text)"""
     paths = [os.path.join(HERE, 'release')]
     out = os.path.join(ROOT, 'build', 'release')
     if os.path.isdir(out):

@@ -1,19 +1,3 @@
-"""Stage 2 difference tests: the C translation of real game instructions
-against Unicorn (Cortex-A8: ARMv7, VFPv3 with short vectors, NEON).
-
-Usage:
-  python -I tests/difftest.py <exe> <functions.json> <work_dir>
-         [--per-form N] [--random N] [--states N] [--seed N] [--only-key TEXT]
-
-1. picks sample "units" from the code stage 1 found: up to N per instruction
-   form (mode, mnemonic, flags, condition, operand shape) plus N random
-   ones; an IT instruction and the instructions it covers form one unit;
-2. translates each unit with armc.Translator in test mode into tests.c and
-   builds difftest.dll (clang, x86_64) with tests/tmem.c as guest memory;
-3. runs every unit from several random states in the DLL and in Unicorn and
-   compares registers, flags, Q, FPSCR flags, d0-d31, written memory and the
-   next pc.
-"""
 import ctypes
 import json
 import os
@@ -68,7 +52,6 @@ def form_key(ins, thumb):
                                '?' if cond else '', shape_of(ins))
 
 
-# 1. units
 def decode_fn(m, md, fn):
     out = []
     for a, e in fn['runs']:
@@ -77,7 +60,6 @@ def decode_fn(m, md, fn):
 
 
 def units_of(fn, insns):
-    """Split a function's instructions into test units (IT blocks together)."""
     units, i = [], 0
     ctl = {s: (k, t) for s, k, t in fn.get('ctl', [])}
     while i < len(insns):
@@ -90,7 +72,6 @@ def units_of(fn, insns):
         else:
             grp = [ins]
             i += 1
-        # Must be contiguous.
         if any(grp[k].address + grp[k].size != grp[k + 1].address for k in range(len(grp) - 1)):
             continue
         heads = [split_mnemonic(x)[0] for x in grp]
@@ -116,7 +97,7 @@ def select_units(m, data, per_form, n_random, rng):
     for d in md.values():
         d.detail = True
     seen = Counter()
-    chosen = {}                     # key -> list of (fstart, [addrs], table)
+    chosen = {}
     total = 0
     pool = []
     for fn in data['functions']:
@@ -127,7 +108,6 @@ def select_units(m, data, per_form, n_random, rng):
             seen[key] += 1
             item = (fn['start'], [x.address for x in grp], table)
             if vec:
-                # VFP short-vector functions: every instruction (FPSCR.LEN > 1 inside).
                 pool.append((key, item))
             lst = chosen.setdefault(key, [])
             if len(lst) < per_form:
@@ -145,7 +125,6 @@ def select_units(m, data, per_form, n_random, rng):
     return units, seen, total
 
 
-# 2. C source
 def gen_tests(m, data, units):
     prog = Program(m, data)
     fns = {f['start']: f for f in data['functions']}
@@ -167,7 +146,6 @@ def gen_tests(m, data, units):
         pos = 0
         for a0, i in sorted(lst):
             if vec:
-                # FPSCR (vector length) is tracked along the function.
                 while pos < at[a0]:
                     try:
                         tr.translate(insns[pos])
@@ -222,7 +200,6 @@ def gen_tests(m, data, units):
 
 
 def table_regs(fn, tb, last, grp):
-    """Registers to set so a table jump takes a real entry: (index_reg, choices, base_reg, base)."""
     ins = next(x for x in grp if x.address == tb['site'])
     ops = ins.operands
     choices = [k for k, t in enumerate(tb['targets']) if t is not None]
@@ -237,7 +214,6 @@ def table_regs(fn, tb, last, grp):
     return None
 
 
-# 3. run
 class CPU(ctypes.Structure):
     _fields_ = [('r', ctypes.c_uint32 * 16), ('n', ctypes.c_uint32), ('z', ctypes.c_uint32),
                 ('c', ctypes.c_uint32), ('v', ctypes.c_uint32), ('q', ctypes.c_uint32),
@@ -295,7 +271,6 @@ def rand_state(rng, meta):
     regs = [rand32(rng) for _ in range(15)]
     if meta['mem']:
         al = 15 if meta['align16'] else 3
-        # Keep addresses away from the ends of the address space (no wrap).
         regs = [v & ~al & 0x3FFFFFFF for v in regs]
         regs = [v | 0x10000 if v < 0x10000 else v for v in regs]
     t = meta['table']
@@ -352,9 +327,6 @@ class UcRunner:
                 'd': [uc.reg_read(r) for r in UC_D], 'next': pc | ((cpsr >> 5) & 1)}
 
     def on_code(self, uc, addr, size, user):
-        # Before the first instruction outside the unit (or a second visit):
-        # take the state there. Unicorn may run on a little after emu_stop
-        # when the unit is an IT block that branches; that part is ignored.
         if (addr not in self.unit or addr in self.done) and self.snap is None:
             self.snap = self.state(addr)
             uc.emu_stop()
@@ -408,8 +380,6 @@ class UcRunner:
         start = meta['addrs'][0] | int(meta['thumb'])
         err = None
         try:
-            # Unicorn's instruction count is unreliable in IT blocks; the code
-            # hook stops it when execution leaves the unit.
             self.unit, self.done = set(meta['addrs']), set()
             self.snap, self.unit_writes = None, []
             uc.emu_start(start, 0xFFFFFFFE, count=64)
@@ -419,7 +389,7 @@ class UcRunner:
         if res is None:
             res = self.state()
         else:
-            err = None                          # an error after leaving the unit does not count
+            err = None
         res['err'] = err
         res['written'] = {a + k for a, s in self.unit_writes for k in range(s)}
         return res
@@ -486,7 +456,7 @@ def compare(dll, ucr, meta, cres, ures):
         diffs.append('next c=%08x uc=%08x' % (cres['next'], ures['next']))
     for a in sorted(cres['written'] | ures['written']):
         if a >= 0xFFFF0000:
-            continue                            # wrapped addresses: Unicorn's top page is unreliable
+            continue
         cb, ub = dll.tm_peek(a), ucr.byte(a)
         if cb != ub:
             diffs.append('mem %08x c=%02x uc=%02x' % (a, cb, ub))
@@ -526,7 +496,6 @@ def main():
     dll.tm_init.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
     dll.run_test.argtypes = [ctypes.c_int, ctypes.c_void_p]
     dll.tm_written.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    # Guest image: __TEXT and __DATA at their addresses (zero-fill included).
     segs = [g for g in m.segments if g.name in ('__TEXT', '__DATA')]
     img_base = segs[0].vmaddr
     img_end = max(g.vmaddr + g.vmsize for g in segs)

@@ -1,22 +1,15 @@
-/* imp_pthread.c -- POSIX threads (Darwin layouts) on Win32.
-
-   The game's pthread objects are Darwin structs in its memory: a signature word, then opaque
-   bytes.  The host keeps its own object (CRITICAL_SECTION, CONDITION_VARIABLE, SRWLOCK) and stores
-   a pointer to it in the opaque area; statically initialised objects (PTHREAD_MUTEX_INITIALIZER
-   etc.) are recognised by their Darwin signature and set up on first use.
-   pthread_t is the address of a host ThreadRec. */
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "abi.h"
 #include "rt.h"
 
-#define SIG_MUTEX_INIT   0x32AAABA7u   /* Darwin _PTHREAD_MUTEX_SIG_init */
-#define SIG_RMUTEX_INIT  0x32AAABA1u   /* _PTHREAD_RECURSIVE_MUTEX_SIG_init */
+#define SIG_MUTEX_INIT   0x32AAABA7u
+#define SIG_RMUTEX_INIT  0x32AAABA1u
 #define SIG_COND_INIT    0x3CB0B1BBu
 #define SIG_RWLOCK_INIT  0x2DA8B3B4u
-#define SIG_HOST_MUTEX   0x47544D58u   /* "GTMX": made by the host */
+#define SIG_HOST_MUTEX   0x47544D58u
 #define SIG_HOST_COND    0x4754434Eu
 #define SIG_HOST_RWLOCK  0x4754524Cu
 
@@ -33,8 +26,6 @@ static void need_init_lock(void)
         init_ready = 1;
     }
 }
-
-/* mutexes (always recursive: a CRITICAL_SECTION) */
 
 static CRITICAL_SECTION *mutex_of(u32 m)
 {
@@ -80,8 +71,6 @@ u32 h_pthread_mutexattr_init(u32 a) { wr32(a, 0x4D555458); wr32(a + 4, 0); retur
 u32 h_pthread_mutexattr_destroy(u32 a) { (void)a; return 0; }
 u32 h_pthread_mutexattr_settype(u32 a, u32 t) { wr32(a + 4, t); return 0; }
 
-/* condition variables */
-
 static CONDITION_VARIABLE *cond_of(u32 c)
 {
     if (rd32(c) == SIG_HOST_COND)
@@ -117,7 +106,6 @@ u32 h_pthread_cond_destroy(u32 c)
     return 0;
 }
 u32 h_pthread_cond_signal(u32 c) { WakeConditionVariable(cond_of(c)); return 0; }
-/* abstime: struct timespec {time_t tv_sec; long tv_nsec;} in wall-clock time */
 u32 h_pthread_cond_timedwait(u32 c, u32 m, u32 ts)
 {
     FILETIME ft;
@@ -129,8 +117,6 @@ u32 h_pthread_cond_timedwait(u32 c, u32 m, u32 ts)
         return 0;
     return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT_D : 0;
 }
-
-/* read-write locks */
 
 typedef struct { SRWLOCK l; volatile DWORD writer; } RwLock;
 
@@ -188,8 +174,6 @@ u32 h_pthread_rwlock_unlock(u32 r)
     return 0;
 }
 
-/* threads */
-
 typedef struct ThreadRec {
     HANDLE h;
     u32 start, arg, result;
@@ -200,7 +184,6 @@ typedef struct ThreadRec {
 
 static __thread ThreadRec *self_rec;
 
-/* Darwin pthread_attr_t: sig, then (here) the stack size and the detach state. */
 u32 h_pthread_attr_init(u32 a)
 {
     memset(GP(a), 0, 40);
@@ -229,7 +212,6 @@ u32 h_pthread_create(u32 out, u32 attr, u32 start, u32 arg)
     t->arg = arg;
     t->stack = attr && rd32(attr) == 0x54484441 ? rd32(attr + 4) : 512 * 1024;
     t->detached = attr && rd32(attr) == 0x54484441 && rd32(attr + 8) == 2;
-    /* the host stack holds the recompiled frames, which are larger than the game's */
     t->h = CreateThread(NULL, 16u << 20, thread_main, t, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (!t->h) {
         free(t);
@@ -240,14 +222,6 @@ u32 h_pthread_create(u32 out, u32 attr, u32 start, u32 arg)
     return 0;
 }
 
-/* SCHED_YIELD (optimisation pass 6, GT_SCHED_YIELD): a sched_yield that only returns 0 lets the game's
-   loops that wait for another thread by yielding spin at full speed: 96-115 thousand calls a frame at the start and
-   17 thousand a frame on the render thread while a race loads (measured on a test save).  On iOS the call
-   gives the rest of the time slice to another thread that is ready, so this does the same (SwitchToThread:
-   another ready thread on this core runs, else the call returns at once, as on iOS).  Measured on an 8-core
-   laptop: the spins ~30 times fewer, the race's loading time the same (11.02 / 11.06 s); the CPU time it frees
-   counts on 2-4 core CPUs, where the spinning thread takes a core the loader needs.
-   GT_SCHED_YIELD=0: returns at once. */
 u32 h_sched_yield(void)
 {
     static int on = -1;

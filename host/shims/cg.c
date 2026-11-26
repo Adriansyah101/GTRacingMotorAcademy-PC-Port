@@ -1,28 +1,9 @@
-/* cg.c -- CoreGraphics and UIGraphics, as far as the game's UIKit overlay code needs them.
-
-   Every caller of these is UIKit overlay code: the IGP "Top Deals" browser window
-   (-[FreemiumIGPViewController buttonPressed:], DoRotate:), the splash screen controller, the ad and
-   offer libraries (Tapjoy TJCVGUtil, InMobi IMAdCloseButton / IMEmbeddedWebViewController, AdMob
-   GADIntrinsicImages), the avatar picker and -[EAGLView saveViewToPhotoLibrary:].  The game itself
-   draws with OpenGL ES only.  This port does not draw UIKit views (uikit.c keeps them for layout and
-   touches), so what these functions paint would never be seen: the geometry (CGRect,
-   CGAffineTransform) is exact, because view layout and hit testing use it, and the objects (contexts,
-   images, colour spaces, gradients, data providers) are real, with the state and sizes the callers
-   read back, but painting into a context (fills, strokes, images, gradients) leaves its pixels as they
-   were.  The game reads no pixels back through CoreGraphics: it imports no CGBitmapContextGetData or
-   CGImageGetDataProvider.  One image's pixels are read here: the garage's screenshot (at the end).
-
-   The objects are host Objective-C objects (NSObject subclasses), so CFRetain / CFRelease work on them
-   as on iOS, where they are CFTypes.  UIGraphicsGetImageFromCurrentImageContext returns nil: the
-   port's UIImage has +imageWithCGImage: only (imageNamed: and friends give nil). */
 #include <math.h>
 #include <string.h>
 
 #include "rt.h"
 #include "abi.h"
 #include "ns.h"
-
-/* geometry */
 
 static GtRect standard(GtRect r)
 {
@@ -64,7 +45,7 @@ void h_CGRectInset(u32 out, GtRect r, float dx, float dy)
     r = standard(r);
     r.x += dx, r.y += dy, r.w -= 2 * dx, r.h -= 2 * dy;
     if (r.w < 0 || r.h < 0)
-        r = (GtRect){INFINITY, INFINITY, 0, 0};   /* CGRectNull */
+        r = (GtRect){INFINITY, INFINITY, 0, 0};
     put_rect(out, r);
 }
 void h_CGRectOffset(u32 out, GtRect r, float dx, float dy)
@@ -88,7 +69,6 @@ void h_CGRectIntersection(u32 out, GtRect a, GtRect b)
     put_rect(out, x1 < x0 || y1 < y0 ? n : (GtRect){x0, y0, x1 - x0, y1 - y0});
 }
 
-/* t1 then t2 (CGAffineTransformConcat order) */
 static GtAffine concat(GtAffine t1, GtAffine t2)
 {
     return (GtAffine){t1.a * t2.a + t1.b * t2.c,  t1.a * t2.b + t1.b * t2.d,
@@ -104,7 +84,6 @@ void h_CGAffineTransformMakeRotation(u32 out, float a) { put_aff(out, rotation(a
 void h_CGAffineTransformMakeScale(u32 out, float sx, float sy) { put_aff(out, (GtAffine){sx, 0, 0, sy, 0, 0}); }
 void h_CGAffineTransformMakeTranslation(u32 out, float tx, float ty) { put_aff(out, (GtAffine){1, 0, 0, 1, tx, ty}); }
 void h_CGAffineTransformConcat(u32 out, GtAffine t1, GtAffine t2) { put_aff(out, concat(t1, t2)); }
-/* Rotate / Scale / Translate apply the new step first, then t */
 void h_CGAffineTransformRotate(u32 out, GtAffine t, float a) { put_aff(out, concat(rotation(a), t)); }
 void h_CGAffineTransformScale(u32 out, GtAffine t, float sx, float sy)
 {
@@ -115,10 +94,8 @@ void h_CGAffineTransformTranslate(u32 out, GtAffine t, float tx, float ty)
     put_aff(out, concat((GtAffine){1, 0, 0, 1, tx, ty}, t));
 }
 
-/* objects */
-
-typedef struct { u32 isa; u32 model; } Space;            /* kCGColorSpaceModelMonochrome 0, RGB 1 */
-typedef struct { u32 isa; u32 w, h, bpc, bpp, bpr, info, data, size; } Image;   /* data: the provider's */
+typedef struct { u32 isa; u32 model; } Space;
+typedef struct { u32 isa; u32 w, h, bpc, bpp, bpr, info, data, size; } Image;
 typedef struct { u32 isa; u32 info, data, size, release; } Provider;
 typedef struct { u32 isa; u32 space, count; } Gradient;
 
@@ -146,7 +123,6 @@ static id make(u32 *k, const char *name, u32 bytes)
 
 static int is_a(id o, u32 k) { return o && k && rd32(o) == k; }
 
-/* drawing is not rendered (see the top of the file): say so once */
 static void not_painted(const char *what)
 {
     static int said;
@@ -168,7 +144,6 @@ u32 h_CGColorSpaceCreateDeviceGray(void) { return space_new(0); }
 u32 h_CGColorSpaceGetModel(u32 s) { return is_a(s, cls_space) ? ((Space *)GP(s))->model : (u32)-1; }
 void h_CGColorSpaceRelease(u32 s) { objc_release(s); }
 
-/* CGColors are UIColors here (-[UIColor CGColor] returns self): {isa, r, g, b, a} */
 u32 h_CGColorGetComponents(u32 col) { return col ? col + 4 : 0; }
 u32 h_CGColorGetNumberOfComponents(u32 col) { return col ? 4 : 0; }
 u32 h_CGColorGetColorSpace(u32 col)
@@ -176,7 +151,7 @@ u32 h_CGColorGetColorSpace(u32 col)
     static id rgb;
     (void)col;
     if (!rgb)
-        rgb = space_new(1);   /* shared, never released ("Get" rule) */
+        rgb = space_new(1);
     return rgb;
 }
 
@@ -192,7 +167,7 @@ u32 h_CGImageCreate(u32 w, u32 h, u32 bpc, u32 bpp, u32 bpr, u32 space, u32 info
 {
     (void)space, (void)decode, (void)interpolate, (void)intent;
     id o = image_new(w, h, bpc, bpp, bpr, info);
-    if (is_a(provider, cls_provider)) {               /* its pixels, while the provider's buffer lives */
+    if (is_a(provider, cls_provider)) {
         ((Image *)GP(o))->data = ((Provider *)GP(provider))->data;
         ((Image *)GP(o))->size = ((Provider *)GP(provider))->size;
     }
@@ -210,8 +185,6 @@ u32 h_CGImageGetWidth(u32 img) { return is_a(img, cls_image) ? ((Image *)GP(img)
 u32 h_CGImageGetHeight(u32 img) { return is_a(img, cls_image) ? ((Image *)GP(img))->h : 0; }
 void h_CGImageRelease(u32 img) { objc_release(img); }
 
-/* The image does not keep the provider (no pixels are kept), so the provider's release callback,
-   which frees the caller's buffer, runs when the caller releases the provider. */
 u32 h_CGDataProviderCreateWithData(u32 info, u32 data, u32 size, u32 release)
 {
     id o = make(&cls_provider, "CGDataProvider", sizeof(Provider));
@@ -242,8 +215,6 @@ u32 h_CGGradientCreateWithColorComponents(u32 space, u32 components, u32 locatio
 }
 void h_CGGradientRelease(u32 g) { objc_release(g); }
 
-/* contexts */
-
 static id context_new(u32 w, u32 h, u32 bpc, u32 bpr, u32 info, u32 data)
 {
     id o = make(&cls_context, "CGContext", sizeof(Context));
@@ -251,7 +222,7 @@ static id context_new(u32 w, u32 h, u32 bpc, u32 bpr, u32 info, u32 data)
     x->w = w, x->h = h, x->bpc = bpc, x->bpr = bpr, x->info = info, x->data = data;
     GState *g = &x->gs[0];
     g->ctm = (GtAffine){1, 0, 0, 1, 0, 0};
-    g->fill[3] = g->stroke[3] = 1;   /* opaque black */
+    g->fill[3] = g->stroke[3] = 1;
     g->line = 1;
     return o;
 }
@@ -316,7 +287,6 @@ void h_CGContextSetRGBStrokeColor(u32 ctx, float r, float g_, float b, float a)
     if (g)
         g->stroke[0] = r, g->stroke[1] = g_, g->stroke[2] = b, g->stroke[3] = a;
 }
-/* components in the context's fill / stroke colour space: the callers set RGB spaces (4 floats) */
 void h_CGContextSetFillColor(u32 ctx, u32 comps)
 {
     GState *g = gs(ctx);
@@ -331,7 +301,6 @@ void h_CGContextSetStrokeColor(u32 ctx, u32 comps)
 }
 void h_CGContextSetStrokeColorSpace(u32 ctx, u32 space) { (void)ctx, (void)space; }
 
-/* paths and clips: nothing is painted, so they are not kept */
 void h_CGContextBeginPath(u32 ctx) { (void)ctx; }
 void h_CGContextClosePath(u32 ctx) { (void)ctx; }
 void h_CGContextMoveToPoint(u32 ctx, float x, float y) { (void)ctx, (void)x, (void)y; }
@@ -361,18 +330,15 @@ void h_CGContextDrawLinearGradient(u32 ctx, u32 grad, GtPoint p0, GtPoint p1, u3
     not_painted("CGContextDrawLinearGradient");
 }
 
-/* UIGraphics: a stack of image contexts (UIKit drawing happens on the main thread) */
-
 #define UIG_DEPTH 16
 static id uig_stack[UIG_DEPTH];
 static int uig_n;
-static id uig_view_ctx;   /* UIGraphicsGetCurrentContext outside an image context (in a drawRect:) */
+static id uig_view_ctx;
 
 void h_UIGraphicsBeginImageContext(GtSize s)
 {
     u32 w = s.w > 0 ? (u32)ceilf(s.w) : 0, h = s.h > 0 ? (u32)ceilf(s.h) : 0;
-    id ctx = context_new(w, h, 8, w * 4, 1 /* kCGImageAlphaPremultipliedLast */, 0);
-    /* UIKit's image contexts have the origin at the top left: flip like UIKit does */
+    id ctx = context_new(w, h, 8, w * 4, 1, 0);
     GState *g = gs(ctx);
     g->ctm = (GtAffine){1, 0, 0, -1, 0, (float)h};
     if (uig_n < UIG_DEPTH)
@@ -384,29 +350,24 @@ u32 h_UIGraphicsGetCurrentContext(void)
 {
     if (uig_n)
         return uig_stack[uig_n - 1];
-    /* a drawRect: of a view: UIKit would have pushed the view's context; this port never calls
-       drawRect: itself, but a game method may (IMAdCloseButton drawRect:), so give it a context */
     if (!uig_view_ctx)
         uig_view_ctx = context_new(0, 0, 8, 0, 1, 0);
     return uig_view_ctx;
 }
-u32 h_UIGraphicsGetImageFromCurrentImageContext(void) { return 0; }   /* no UIImage in this port */
+u32 h_UIGraphicsGetImageFromCurrentImageContext(void) { return 0; }
 void h_UIGraphicsEndImageContext(void)
 {
     if (uig_n)
         objc_release(uig_stack[--uig_n]);
 }
 
-/* the garage's Screenshot button
-   Car Collection > View > Screenshot runs -[EAGLView saveViewToPhotoLibrary:] (0x309d68): glReadPixels of
-   the drawable, its rows turned top down, CGImageCreate (RGBA, 8 bits), +[UIImage imageWithCGImage:],
-   UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil): the iPad's Photos.  The port had neither, and the
-   game stopped (port fault: pressing the Screenshot button crashed the game).
-   Here a UIImage is {isa, CGImage}, and the album is a folder: Pictures\GT Racing (GT_PHOTO_DIR for
-   tests), a PNG per shot through GDI+, turned to the landscape the player sees (the drawable is
-   portrait: its top row is the picture's left column, as eagl.c's present has it). */
+#ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
+#else
+#include <dlfcn.h>
+#include "compat.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -425,6 +386,7 @@ static void uiimage_dealloc(CPU *c)
     objc_free_instance(SELF);
 }
 
+#ifdef _WIN32
 typedef struct { UINT32 version; void *debug; BOOL no_thread, no_codecs; } GpStartup;
 int __stdcall GdiplusStartup(ULONG_PTR *token, const GpStartup *in, void *out);
 int __stdcall GdipCreateBitmapFromScan0(int w, int h, int stride, int format, BYTE *scan0, void **bitmap);
@@ -441,16 +403,122 @@ static int save_png(const WCHAR *path, u8 *bgrx, int w, int h)
             return 0;
     }
     void *bmp = NULL;
-    int ok = !GdipCreateBitmapFromScan0(w, h, w * 4, 0x22009 /* PixelFormat32bppRGB */, bgrx, &bmp) && bmp &&
+    int ok = !GdipCreateBitmapFromScan0(w, h, w * 4, 0x22009, bgrx, &bmp) && bmp &&
              !GdipSaveImageToFile(bmp, path, &png, NULL);
     if (bmp)
         GdipDisposeImage(bmp);
     return ok;
 }
+#else
+static u32 png_crc(u32 c, const u8 *p, size_t n)
+{
+    static u32 t[256];
+    if (!t[1])
+        for (u32 i = 0; i < 256; i++) {
+            u32 k = i;
+            for (int j = 0; j < 8; j++)
+                k = k & 1 ? 0xedb88320u ^ (k >> 1) : k >> 1;
+            t[i] = k;
+        }
+    c ^= 0xffffffffu;
+    while (n--)
+        c = t[(c ^ *p++) & 0xff] ^ (c >> 8);
+    return c ^ 0xffffffffu;
+}
+
+static void be32(u8 *b, u32 v) { b[0] = (u8)(v >> 24), b[1] = (u8)(v >> 16), b[2] = (u8)(v >> 8), b[3] = (u8)v; }
+
+static int png_chunk(FILE *f, const char *type, const u8 *d, u32 n)
+{
+    u8 h[8], t[4];
+    be32(h, n);
+    memcpy(h + 4, type, 4);
+    be32(t, png_crc(png_crc(0, h + 4, 4), d, n));
+    return fwrite(h, 1, 8, f) == 8 && (!n || fwrite(d, 1, n, f) == n) && fwrite(t, 1, 4, f) == 4;
+}
+
+static u8 *zlib_stored(const u8 *raw, size_t n, size_t *out_n)
+{
+    size_t blocks = n / 65535 + 1;
+    u8 *z = malloc(2 + n + blocks * 5 + 4), *o = z;
+    if (!z)
+        return NULL;
+    *o++ = 0x78, *o++ = 0x01;
+    u32 a = 1, b = 0;
+    for (size_t i = 0; i < n; i++)
+        a = (a + raw[i]) % 65521, b = (b + a) % 65521;
+    size_t at = 0;
+    do {
+        size_t k = n - at < 65535 ? n - at : 65535;
+        *o++ = at + k == n;
+        *o++ = (u8)k, *o++ = (u8)(k >> 8), *o++ = (u8)~k, *o++ = (u8)(~k >> 8);
+        memcpy(o, raw + at, k);
+        o += k, at += k;
+    } while (at < n);
+    be32(o, b << 16 | a);
+    *out_n = (size_t)(o + 4 - z);
+    return z;
+}
+
+static u8 *zlib_pack(const u8 *raw, size_t n, size_t *out_n)
+{
+    static int tried;
+    static int (*compress2)(u8 *, unsigned long *, const u8 *, unsigned long, int);
+    static unsigned long (*bound)(unsigned long);
+    if (!tried) {
+        tried = 1;
+        void *so = dlopen("libz.so.1", RTLD_NOW | RTLD_LOCAL);
+        if (so) {
+            *(void **)&compress2 = dlsym(so, "compress2");
+            *(void **)&bound = dlsym(so, "compressBound");
+        }
+    }
+    if (compress2 && bound) {
+        unsigned long zn = bound((unsigned long)n);
+        u8 *z = malloc(zn);
+        if (z && !compress2(z, &zn, raw, (unsigned long)n, 6)) {
+            *out_n = zn;
+            return z;
+        }
+        free(z);
+    }
+    return zlib_stored(raw, n, out_n);
+}
+
+static int save_png(const char *path, const u8 *bgrx, int w, int h)
+{
+    size_t row = (size_t)w * 3 + 1, n = row * (size_t)h, zn = 0;
+    u8 *raw = malloc(n);
+    if (!raw)
+        return 0;
+    for (int y = 0; y < h; y++) {
+        u8 *r = raw + row * (size_t)y;
+        const u8 *p = bgrx + (size_t)y * (size_t)w * 4;
+        *r++ = 0;
+        for (int x = 0; x < w; x++, p += 4)
+            *r++ = p[2], *r++ = p[1], *r++ = p[0];
+    }
+    u8 *z = zlib_pack(raw, n, &zn);
+    free(raw);
+    FILE *f = z ? fopen(path, "wb") : NULL;
+    u8 ihdr[13] = {0};
+    be32(ihdr, (u32)w);
+    be32(ihdr + 4, (u32)h);
+    ihdr[8] = 8, ihdr[9] = 2;
+    int ok = f && fwrite("\x89PNG\r\n\x1a\n", 1, 8, f) == 8 && png_chunk(f, "IHDR", ihdr, 13) &&
+             png_chunk(f, "IDAT", z, (u32)zn) && png_chunk(f, "IEND", NULL, 0);
+    if (f && fclose(f))
+        ok = 0;
+    if (f && !ok)
+        remove(path);
+    free(z);
+    return ok;
+}
+#endif
 
 void h_UIImageWriteToSavedPhotosAlbum(u32 image, u32 target, u32 sel, u32 ctx)
 {
-    (void)target, (void)sel, (void)ctx;                 /* the game asks for no answer (nil, nil, nil) */
+    (void)target, (void)sel, (void)ctx;
     u32 cg = image ? ((UiImage *)GP(image))->cgimage : 0;
     Image *x = is_a(cg, cls_image) ? GP(cg) : NULL;
     if (!x || !x->data || x->bpp != 32 || x->bpc != 8 || !x->w || !x->h || x->bpr < x->w * 4 || (unsigned long long)x->bpr * x->h > x->size) {
@@ -464,11 +532,11 @@ void h_UIImageWriteToSavedPhotosAlbum(u32 image, u32 target, u32 sel, u32 ctx)
         return;
     for (int y = 0; y < h; y++)
         for (int k = 0; k < w; k++) {
-            /* landscape (k, y) <- the image's row k, column (width - 1 - y) when portrait */
             const u8 *p = portrait ? src + (size_t)k * x->bpr + (size_t)(x->w - 1 - y) * 4 : src + (size_t)y * x->bpr + (size_t)k * 4;
             u8 *q = out + ((size_t)y * w + k) * 4;
             q[0] = p[2], q[1] = p[1], q[2] = p[0], q[3] = 255;
         }
+#ifdef _WIN32
     WCHAR dir[MAX_PATH], path[MAX_PATH + 64];
     const char *env = getenv("GT_PHOTO_DIR");
     if (env && *env)
@@ -485,13 +553,33 @@ void h_UIImageWriteToSavedPhotosAlbum(u32 image, u32 target, u32 sel, u32 ctx)
              t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
     int ok = save_png(path, out, w, h);
     free(out);
-    /* only the file's own name in the log (privacy): the Pictures folder can be anywhere, also outside
-       the user's folder that the log hides (a second drive, a folder named after the Windows user) */
     char u8path[MAX_PATH * 3 + 64];
     const WCHAR *file = wcsrchr(path, L'\\');
     WideCharToMultiByte(CP_UTF8, 0, file ? file + 1 : path, -1, u8path, sizeof u8path, NULL, NULL);
     rt_log("[cg] screenshot %d x %d %s %s\\%s\n", w, h, ok ? "saved to" : "NOT saved to",
            env && *env ? "GT_PHOTO_DIR" : "Pictures\\GT Racing", u8path);
+#else
+    char dir[MAX_PATH], path[MAX_PATH + 64];
+    const char *env = getenv("GT_PHOTO_DIR");
+    if (env && *env)
+        snprintf(dir, sizeof dir, "%s", env);
+    else {
+        const char *home = getenv("HOME");
+        snprintf(dir, sizeof dir, "%s/Pictures", home && *home ? home : ".");
+        CreateDirectoryA(dir, NULL);
+        strncat(dir, "/GT Racing", sizeof dir - strlen(dir) - 1);
+    }
+    CreateDirectoryA(dir, NULL);
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    snprintf(path, sizeof path, "%s/GTRacing_%04u%02u%02u_%02u%02u%02u_%03u.png", dir, t.wYear, t.wMonth, t.wDay,
+             t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    int ok = save_png(path, out, w, h);
+    free(out);
+    const char *file = strrchr(path, '/');
+    rt_log("[cg] screenshot %d x %d %s %s/%s\n", w, h, ok ? "saved to" : "NOT saved to",
+           env && *env ? "GT_PHOTO_DIR" : "Pictures/GT Racing", file ? file + 1 : path);
+#endif
 }
 
 void cg_init(void)

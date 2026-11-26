@@ -30,7 +30,6 @@ RADIUS = 0.16
 
 
 def jpeg_to_png(src, dst):
-    # the paths go in the environment: -Command joins its arguments into one line, which splits paths with spaces
     ps = ('$ErrorActionPreference = "Stop"; Add-Type -AssemblyName System.Drawing; '
           '$i = [System.Drawing.Image]::FromFile($env:ICON_SRC); '
           '$i.Save($env:ICON_DST, [System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose()')
@@ -109,7 +108,6 @@ def png_read(path):
 
 
 def round_corners(w, h, px, r):
-    """alpha 0 outside a rounded rectangle of radius r, antialiased over a pixel (4 x 4 samples)"""
     for y in range(h):
         for x in range(w):
             cx = r if x < r else (w - r if x >= w - r else None)
@@ -127,7 +125,6 @@ def round_corners(w, h, px, r):
 
 
 def shrink(w, h, px, n):
-    """area average to n x n (alpha-weighted colours)"""
     out = bytearray()
     for ty in range(n):
         y0, y1 = ty * h / n, (ty + 1) * h / n
@@ -165,7 +162,6 @@ def png_write(n, px):
 
 
 def bmp_entry(n, px):
-    """the .ico's bitmap form: BITMAPINFOHEADER (height doubled for the mask), BGRA bottom row first, AND mask"""
     hdr = struct.pack('<IiiHHIIiiII', 40, n, n * 2, 1, 32, 0, 0, 0, 0, 0, 0)
     body = bytearray()
     for y in range(n - 1, -1, -1):

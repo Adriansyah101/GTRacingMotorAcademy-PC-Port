@@ -1,18 +1,19 @@
-/* imp_libc.c -- the C library the game imports (libSystem): process, memory, strings, stdio,
-   files, time, ctype, compiler helpers.  Most map onto the host CRT; this file has the ones
-   whose iOS behaviour or layout differs (struct stat / tm, open flags, RAND_MAX, errno...). */
 #include <ctype.h>
+#ifdef _WIN32
 #include <direct.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
+#ifdef _WIN32
 #include <io.h>
+#endif
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "abi.h"
 #include "rt.h"
@@ -21,8 +22,6 @@
 
 #define S(a) ((const char *)GP(a))
 #define W(a) ((char *)GP(a))
-
-/* errno (Darwin numbers) */
 
 static u32 darwin_errno(int e)
 {
@@ -40,8 +39,6 @@ static u32 darwin_errno(int e)
 static void gt_set_errno(int host_errno) { rt_thread()->errno_cell = darwin_errno(host_errno); }
 u32 h_error(CPU *c) { return GA(&((RtThread *)c->rt)->errno_cell); }
 
-/* process */
-
 void h_exit(CPU *c, u32 code)
 {
     (void)c;
@@ -58,8 +55,6 @@ void h_assert_rtn(u32 func, u32 file, u32 line, u32 expr)
              func ? S(func) : "?", file ? S(file) : "?", line);
 }
 
-/* no variable is set for the game (HOME, TMPDIR, USER ...): it finds its folders through NSSearchPathFor... and
-   never sees the PC's environment (the Windows user's name) */
 u32 h_getenv(u32 name)
 {
     (void)name;
@@ -89,8 +84,6 @@ u32 h_sigaction(u32 sig, u32 act, u32 old)
     return 0;
 }
 
-/* memory */
-
 u32 h_memcpy_chk(u32 d, u32 s, u32 n, u32 cap) { (void)cap; return GA(memcpy(GP(d), GP(s), n)); }
 u32 h_memmove_chk(u32 d, u32 s, u32 n, u32 cap) { (void)cap; return GA(memmove(GP(d), GP(s), n)); }
 u32 h_memset_chk(u32 d, u32 v, u32 n, u32 cap) { (void)cap; return GA(memset(GP(d), (int)v, n)); }
@@ -102,8 +95,6 @@ void h_memset_pattern16(u32 d, u32 pat, u32 n)
     for (u32 i = 0; i < n; i++)
         p[i] = q[i & 15];
 }
-
-/* strings */
 
 u32 h_strcpy_chk(u32 d, u32 s, u32 cap) { (void)cap; return GA(strcpy(W(d), S(s))); }
 u32 h_strcat_chk(u32 d, u32 s, u32 cap) { (void)cap; return GA(strcat(W(d), S(s))); }
@@ -159,19 +150,14 @@ u32 h_basename(u32 p)
     return GA(buf);
 }
 
-/* ctype (Darwin's rune table, dataimp.c) */
-
 u32 gt_runetype(int ch);
 u32 h_maskrune(u32 ch, u32 mask) { return gt_runetype((int)ch) & mask; }
 u32 h_tolower(u32 ch) { return ch < 128 ? (u32)tolower((int)ch) : ch; }
 u32 h_toupper(u32 ch) { return ch < 128 ? (u32)toupper((int)ch) : ch; }
 
-/* random numbers (RAND_MAX is 0x7fffffff on iOS) */
-
 static u32 rand_next = 1;
 static u32 do_rand(u32 *ctx)
 {
-    /* FreeBSD / Darwin rand(): Park-Miller "minimal standard" */
     s32 hi, lo, x = (s32)(*ctx % 0x7ffffffe) + 1;
     hi = x / 127773;
     lo = x % 127773;
@@ -198,8 +184,6 @@ u32 h_arc4random(void)
     return s;
 }
 
-/* qsort (the comparator is guest code) */
-
 static __thread u32 qsort_cmp;
 static int qsort_cb(const void *a, const void *b) { return (int)rt_call2(qsort_cmp, GA(a), GA(b)); }
 void h_qsort(CPU *c, u32 base, u32 n, u32 size, u32 cmp)
@@ -211,15 +195,8 @@ void h_qsort(CPU *c, u32 base, u32 n, u32 size, u32 cmp)
     qsort_cmp = save;
 }
 
-/* stdio */
-
 #define VA(p) ((va_list)(void *)(p))
 
-/* The game's console output (stdout and stderr, which ___stdoutp / ___stderrp hand it, dataimp.c) goes through the
-   log: each line is scrubbed of the player's folders and names (scrub.c), and GT_LOG=0 silences it as it does the
-   host's own lines: nothing is formatted, locked or written then (rt_vlog returns at once; printf's count is
-   still the formatted length).  The same holds for write() to descriptors 1 and 2 and for NSLog (ns_string.c).
-   The game's i386 va_list is a plain pointer to its words, so it can be read twice. */
 static int console(u32 f) { return GP(f) == stdout || GP(f) == stderr; }
 static u32 console_vf(const char *fmt, va_list ap)
 {
@@ -299,17 +276,16 @@ u32 h_vsprintf_chk(u32 buf, u32 flag, u32 cap, u32 fmt, u32 va)
 u32 h_sscanf(u32 s, u32 fmt, const u32 *va) { return (u32)vsscanf(S(s), S(fmt), VA(va)); }
 u32 h_fscanf(u32 f, u32 fmt, const u32 *va) { return (u32)vfscanf(GP(f), S(fmt), VA(va)); }
 
-/* Game paths: absolute host paths (NSBundle / NSHomeDirectory give those), '/' or '\'. */
-const char *gt_host_path(const char *p, char *buf, size_t n);   /* ns_misc.c: guest path -> host path */
+const char *gt_host_path(const char *p, char *buf, size_t n);
 
 u32 h_fopen(u32 path, u32 mode)
 {
     char p[MAX_PATH * 2], m[16];
     snprintf(m, sizeof m - 1, "%s", S(mode));
     if (!strchr(m, 'b'))
-        strcat(m, "b");                     /* no text mode on iOS */
+        strcat(m, "b");
     FILE *f = fopen(gt_host_path(S(path), p, sizeof p), m);
-    softrefl_note_file(p);                  /* SOFT_REFLECTION: the track loaded */
+    softrefl_note_file(p);
     if (!f)
         gt_set_errno(errno);
     if (rt_trace)
@@ -328,8 +304,6 @@ u32 h_remove(u32 path)
     return (u32)remove(gt_host_path(S(path), p, sizeof p));
 }
 
-/* file descriptors */
-
 u32 h_open(u32 path, u32 flags, const u32 *va)
 {
     int f = _O_BINARY;
@@ -344,7 +318,7 @@ u32 h_open(u32 path, u32 flags, const u32 *va)
     if (flags & 0x800) f |= _O_EXCL;
     char p[MAX_PATH * 2];
     int fd = _open(gt_host_path(S(path), p, sizeof p), f, _S_IREAD | _S_IWRITE);
-    softrefl_note_file(p);                  /* SOFT_REFLECTION: the track loaded */
+    softrefl_note_file(p);
     (void)va;
     if (fd < 0)
         gt_set_errno(errno);
@@ -354,16 +328,14 @@ u64 h_lseek(u32 fd, u64 off, u32 whence) { return (u64)_lseeki64((int)fd, (s64)o
 u32 h_read(u32 fd, u32 buf, u32 n) { return (u32)_read((int)fd, GP(buf), n); }
 u32 h_write(u32 fd, u32 buf, u32 n)
 {
-    if (fd == 1 || fd == 2)                 /* the console: through the log, as stdout / stderr above */
+    if (fd == 1 || fd == 2)
         return console_n(GP(buf), n);
     return (u32)_write((int)fd, GP(buf), n);
 }
-/* socket fds (LAN_MULTIPLAYER, net.c) are 900..1019, apart from the CRT's */
 u32 h_close(u32 fd) { return net_is_socket(fd) ? net_close(fd) : (u32)_close((int)fd); }
 u32 h_fcntl(u32 fd, u32 cmd, const u32 *va) { return net_is_socket(fd) ? net_fcntl(fd, cmd, va ? va[0] : 0) : 0; }
 u32 h_ioctl(u32 fd, u32 req, const u32 *va) { return net_is_socket(fd) ? net_ioctl(fd, req, va ? va[0] : 0) : (u32)-1; }
 
-/* Darwin's (32-bit inode) struct stat, 96 bytes. */
 static void put_stat(u32 buf, const struct _stati64 *st)
 {
     u8 *b = GP(buf);
@@ -391,7 +363,7 @@ u32 h_stat(u32 path, u32 buf)
     gt_host_path(S(path), p, sizeof p);
     size_t n = strlen(p);
     while (n > 3 && (p[n - 1] == '/' || p[n - 1] == '\\'))
-        p[--n] = 0;                         /* _stat fails on a trailing slash */
+        p[--n] = 0;
     if (_stati64(p, &st)) {
         gt_set_errno(errno);
         return (u32)-1;
@@ -414,18 +386,15 @@ u32 h_statfs(u32 path, u32 buf)
     (void)path;
     u8 *b = GP(buf);
     memset(b, 0, 348);
-    *(u32 *)(b + 0) = 4096;                 /* f_bsize */
-    *(u32 *)(b + 4) = 4096;                 /* f_iosize */
-    *(u64 *)(b + 8) = 1u << 22;             /* f_blocks: 16 GB */
-    *(u64 *)(b + 16) = 1u << 21;            /* f_bfree */
-    *(u64 *)(b + 24) = 1u << 21;            /* f_bavail */
+    *(u32 *)(b + 0) = 4096;
+    *(u32 *)(b + 4) = 4096;
+    *(u64 *)(b + 8) = 1u << 22;
+    *(u64 *)(b + 16) = 1u << 21;
+    *(u64 *)(b + 24) = 1u << 21;
     return 0;
 }
-/* getcwd, chdir: ns_misc.c (the guest's own working directory) */
 u32 h_utimes(u32 p, u32 t) { (void)p; (void)t; return 0; }
 u32 h_setxattr(u32 p, u32 n, u32 v, u32 s, u32 pos, u32 opt) { (void)p; (void)n; (void)v; (void)s; (void)pos; (void)opt; return 0; }
-
-/* time */
 
 u32 h_time(u32 t)
 {
@@ -440,7 +409,7 @@ static void filetime_now(u64 *us)
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
     u64 v = ((u64)ft.dwHighDateTime << 32 | ft.dwLowDateTime) / 10;
-    *us = v - 11644473600000000ull;          /* since 1970 */
+    *us = v - 11644473600000000ull;
 }
 
 u32 h_gettimeofday(u32 tv, u32 tz)
@@ -462,7 +431,7 @@ double h_CFAbsoluteTimeGetCurrent(void)
 {
     u64 us;
     filetime_now(&us);
-    return (double)us / 1e6 - 978307200.0;  /* since 2001-01-01 */
+    return (double)us / 1e6 - 978307200.0;
 }
 
 u64 h_mach_absolute_time(void)
@@ -470,7 +439,7 @@ u64 h_mach_absolute_time(void)
     LARGE_INTEGER q, f;
     QueryPerformanceCounter(&q);
     QueryPerformanceFrequency(&f);
-    return (u64)((double)q.QuadPart * 1e9 / (double)f.QuadPart);   /* nanoseconds: timebase 1/1 */
+    return (u64)((double)q.QuadPart * 1e9 / (double)f.QuadPart);
 }
 u32 h_mach_timebase_info(u32 info)
 {
@@ -480,7 +449,6 @@ u32 h_mach_timebase_info(u32 info)
 }
 u32 h_mach_thread_self(void) { return GetCurrentThreadId(); }
 
-/* Darwin struct tm: the nine ints, then long tm_gmtoff and char *tm_zone (44 bytes). */
 static void put_tm(u32 out, const struct tm *t, long gmtoff, const char *zone)
 {
     u32 *o = GP(out);
@@ -512,8 +480,6 @@ u32 h_gmtime_r(u32 tp, u32 out)
     return out;
 }
 
-/* compiler helpers (division by zero gives 0, as the game never relies on a trap) */
-
 u32 h_divsi3(u32 a, u32 b) { return b ? (u32)((s32)a == INT32_MIN && (s32)b == -1 ? a : (u32)((s32)a / (s32)b)) : 0; }
 u32 h_modsi3(u32 a, u32 b) { return b && !((s32)a == INT32_MIN && (s32)b == -1) ? (u32)((s32)a % (s32)b) : 0; }
 u32 h_udivsi3(u32 a, u32 b) { return b ? a / b : 0; }
@@ -539,8 +505,6 @@ double h_floatundidf(u64 x) { return (double)x; }
 float h_floatundisf(u64 x) { return (float)x; }
 
 u32 h_OSAtomicAdd32(u32 amount, u32 p) { return (u32)InterlockedAdd((volatile LONG *)GP(p), (LONG)amount); }
-
-/* math the CRT spells differently */
 
 u32 h_lrintf(float x) { return (u32)(s32)lrintf(x); }
 float h_modff(float x, u32 ip)

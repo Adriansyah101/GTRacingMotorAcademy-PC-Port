@@ -1,30 +1,11 @@
-/* p2p.c -- ONLINE_P2P: the main menu's Multiplayer > Online without Gameloft's server.
-
-   Gameloft's server is gone, so Online runs peer to peer, and a friend can host without changing the game's
-   settings.  The original Online
-   mode (NetworkManagerOnline) logs into Gameloft's lobby server (GLXPlayerMPLobby), which is gone, and the
-   server's side of that protocol is not in the game.  So:
-     - The Online tile takes the Local tile's path (GameTypeMenu's handler 0x1bb6c0 sets the game type
-       [G]+0x4390 = 1, Local's NetworkManagerWLAN; Online's was 2), marked as online here.  The races are
-       the Local mode's (net.c), with the players on the internet reached through net.c's tunnel: one UDP
-       port, every far player a virtual address 10.254.254.<n> to the game.
-     - Hosting (the WLAN host binds port 28190): the tunnel opens on UDP 28200 (GT_P2P_PORT) and the port is
-       opened on the way to the internet, first by NAT-PMP to the default route's gateway (home routers with
-       NAT-PMP, and ProtonVPN's port forwarding: its gateway 10.2.0.1 hands out a random port, renewed every
-       45 s), then by UPnP IGD (SSDP, the router's description, AddPortMapping / GetExternalIPAddress).  The
-       public address and port become a room code, GT-XXXXX-XXXXX (Crockford base32 of the 6 bytes), copied
-       to the clipboard and shown in the lobby's server message line.
-     - Joining (the WLAN join search binds 54046): the room code is read from the clipboard (checked again
-       every 2 s while the Join list is open), and the host gets hellos from the tunnel; it learns the joiner
-       from them, so only the host's port has to be open.  The host's server then shows in the Join list.
-     - No port (UPnP off, or the router's own internet address is private: carrier-grade NAT), the lobby
-       says so: ProtonVPN with Port Forwarding on the host's PC, or the other player hosts.
-   Testing: GT_LAN_IP (net.c) gives the room code of that address with no port mapping;
-   GT_P2P_CODE_FILE=<file> is used instead of the clipboard (written by the host, read by the joiner). */
-#define _CRT_RAND_S                       /* rand_s: the session keys */
+#define _CRT_RAND_S
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#else
+#include "compat_net.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,27 +21,22 @@ void net_p2p_stop(void);
 void net_p2p_add_peer(u32 ip_be, u16 port_be);
 void net_p2p_set_key(u32 key);
 
-#define PORT_HOST 28190                   /* the WLAN host's join port */
-#define PORT_SEARCH 54046                 /* the WLAN join list's port */
+#define PORT_HOST 28190
+#define PORT_SEARCH 54046
 #define LOBBY_VTBL 0x787ef8u
 #define LOBBY_UPDATE_SLOT (LOBBY_VTBL + 0x1c)
 #define LOBBY_UPDATE_FN 0x1b4c64u
 
-static int p2p_online;                    /* the Online tile was the last one pressed */
-static volatile int host_state;           /* 0 idle, 1 opening the port, 2 code ready, 3 no port */
+static int p2p_online;
+static volatile int host_state;
 static char room_code[32], host_msg[256];
 static int joining;
 static u32 join_ip, join_key, host_key;
 static u16 join_port;
-static volatile int form_kind, form_enter, form_open_code, name_form_pending;   /* the forms, below */
+static volatile int form_kind, form_enter, form_open_code, name_form_pending;
 static HANDLE host_thread;
 static volatile LONG host_gen;
 
-/* room codes */
-
-/* GT-XXXX-XXXX-XXXX-XXXX: Crockford base32 of 10 bytes, the host's public address (4) and port (2), the session's
-   random key (3: the tunnel takes only packets with it, so a stale code or a stranger who knows the address
-   gets nowhere, and every hosting gets a new code) and a CRC-8 of those 9 (a mistyped code is told apart) */
 static const char B32[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 static u8 crc8(const u8 *p, int n)
@@ -105,7 +81,6 @@ static int b32v(int ch)
     return p ? (int)(p - B32) : -1;
 }
 
-/* the first room code in the text: 1, 0 for none, -1 for one that does not check out (mistyped) */
 static int code_parse(const char *t, u32 *ip_be, u16 *port_be, u32 *key)
 {
     int bad = 0;
@@ -142,8 +117,6 @@ static int code_parse(const char *t, u32 *ip_be, u16 *port_be, u32 *key)
     return bad ? -1 : 0;
 }
 
-/* clipboard (or GT_P2P_CODE_FILE) */
-
 static void clip_put(const char *s)
 {
     const char *f = dev_getenv("GT_P2P_CODE_FILE");
@@ -155,6 +128,7 @@ static void clip_put(const char *s)
         }
         return;
     }
+#ifdef _WIN32
     if (!OpenClipboard(NULL))
         return;
     EmptyClipboard();
@@ -169,6 +143,9 @@ static void clip_put(const char *s)
             GlobalFree(h);
     }
     CloseClipboard();
+#else
+    SDL_SetClipboardText(s);
+#endif
 }
 
 static int clip_get(char *out, size_t cap)
@@ -184,6 +161,7 @@ static int clip_get(char *out, size_t cap)
         fclose(i);
         return n > 0;
     }
+#ifdef _WIN32
     if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(NULL))
         return 0;
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
@@ -196,10 +174,18 @@ static int clip_get(char *out, size_t cap)
         GlobalUnlock(h);
     }
     CloseClipboard();
+#else
+    char *t = SDL_GetClipboardText();
+    if (t) {
+        size_t i = 0;
+        for (; t[i] && i < cap - 1; i++)
+            out[i] = (u8)t[i] < 128 ? t[i] : ' ';
+        out[i] = 0;
+        SDL_free(t);
+    }
+#endif
     return out[0] != 0;
 }
-
-/* the way to the internet */
 
 static int is_private(u32 ip_be)
 {
@@ -208,7 +194,7 @@ static int is_private(u32 ip_be)
            (h >> 16) == 0xa9fe || (h >> 22) == (0x64400000u >> 22) || !h;
 }
 
-/* the gateway and local address the internet traffic takes (a VPN's when one is on) */
+#ifdef _WIN32
 static int default_route(u32 *gw_be, u32 *local_be)
 {
     MIB_IPFORWARDROW r;
@@ -225,8 +211,34 @@ static int default_route(u32 *gw_be, u32 *local_be)
     free(aa);
     return *gw_be != 0;
 }
+#else
+static int default_route(u32 *gw_be, u32 *local_be)
+{
+    *gw_be = *local_be = 0;
+    FILE *f = fopen("/proc/net/route", "r");
+    if (!f)
+        return 0;
+    char line[256], dev[IFNAMSIZ] = "";
+    unsigned long dst, gw, flags;
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "%15s %lx %lx %lx", dev, &dst, &gw, &flags) == 4 && !dst && (flags & 3) == 3) {
+            *gw_be = (u32)gw;
+            break;
+        }
+    fclose(f);
+    struct ifaddrs *ia;
+    if (*gw_be && !getifaddrs(&ia)) {
+        for (struct ifaddrs *a = ia; a; a = a->ifa_next)
+            if (a->ifa_addr && a->ifa_addr->sa_family == AF_INET && !strcmp(a->ifa_name, dev)) {
+                *local_be = ((struct sockaddr_in *)a->ifa_addr)->sin_addr.s_addr;
+                break;
+            }
+        freeifaddrs(ia);
+    }
+    return *gw_be != 0;
+}
+#endif
 
-/* NAT-PMP (RFC 6886): the external address, then a UDP mapping; 0 on no answer */
 static int natpmp(u32 gw_be, u16 port, u32 lifetime, u32 *ext_ip, u16 *ext_port)
 {
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -251,7 +263,7 @@ static int natpmp(u32 gw_be, u16 port, u32 lifetime, u32 *ext_ip, u16 *ext_port)
         ok = 0;
         for (int tries = 0; tries < 3 && !ok; tries++) {
             memset(rq, 0, sizeof rq);
-            rq[1] = 1;                                /* UDP */
+            rq[1] = 1;
             rq[4] = (u8)(port >> 8), rq[5] = (u8)port, rq[6] = (u8)(port >> 8), rq[7] = (u8)port;
             rq[8] = (u8)(lifetime >> 24), rq[9] = (u8)(lifetime >> 16), rq[10] = (u8)(lifetime >> 8), rq[11] = (u8)lifetime;
             sendto(s, (const char *)rq, 12, 0, (struct sockaddr *)&g, sizeof g);
@@ -265,8 +277,6 @@ static int natpmp(u32 gw_be, u16 port, u32 lifetime, u32 *ext_ip, u16 *ext_port)
     closesocket(s);
     return ok;
 }
-
-/* UPnP IGD: SSDP, the description, two SOAP calls */
 
 static int http(u32 ip_be, u16 port, const char *req, char *out, int cap, u32 *local_be)
 {
@@ -348,7 +358,6 @@ static int soap(u32 ip_be, u16 port, const char *path, const char *svc, const ch
     return n > 0 && strstr(out, " 200 ");
 }
 
-/* the mapping made, taken away again when the game ends */
 static struct { u32 ip; u16 port, ext; char path[256]; const char *svc; } um;
 static void upnp_unmap(void)
 {
@@ -363,7 +372,6 @@ static void upnp_unmap(void)
 
 static int upnp(u32 gw_be, u16 *port, u32 *ext_ip, u16 *ext_port)
 {
-    /* SSDP: the gateway's description URL */
     SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     DWORD to = 700;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof to);
@@ -381,7 +389,6 @@ static int upnp(u32 gw_be, u16 *port, u32 *ext_ip, u16 *ext_port)
             snprintf(q, sizeof q, "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\n"
                                   "MX: 1\r\nST: %s\r\n\r\n", st[k]);
             sendto(s, q, (int)strlen(q), 0, (struct sockaddr *)&m, sizeof m);
-            /* the unicast to the gateway too: some routers answer only that */
             struct sockaddr_in g = m;
             g.sin_addr.s_addr = gw_be;
             sendto(s, q, (int)strlen(q), 0, (struct sockaddr *)&g, sizeof g);
@@ -393,7 +400,7 @@ static int upnp(u32 gw_be, u16 *port, u32 *ext_ip, u16 *ext_port)
                     break;
                 buf[n] = 0;
                 if (from.sin_addr.s_addr != gw_be)
-                    continue;                     /* only the router the internet traffic takes */
+                    continue;
                 for (char *l = buf; l && *l; l = strstr(l, "\r\n") ? strstr(l, "\r\n") + 2 : NULL)
                     if (!_strnicmp(l, "LOCATION:", 9)) {
                         const char *v = l + 9;
@@ -440,19 +447,17 @@ static int upnp(u32 gw_be, u16 *port, u32 *ext_ip, u16 *ext_port)
         if (strstr(ctl, "://"))
             url_split(ctl, &cip, &cport, cpath, sizeof cpath);
         else if (snprintf(cpath, sizeof cpath, "%s%s", ctl[0] == '/' ? "" : "/", ctl) >= (int)sizeof cpath)
-            continue;                              /* a control path too long for any router: not this one */
+            continue;
         char out[4096], args[768], lip[16], ip[32];
         inet_ntop(AF_INET, &local, lip, sizeof lip);
         if (!soap(cip, cport, cpath, svcs[k], "GetExternalIPAddress", "", out, sizeof out) ||
             !tag(out, "NewExternalIPAddress", ip, sizeof ip) || inet_pton(AF_INET, ip, ext_ip) != 1)
             continue;
-        /* the port, else the next ones: another PC behind the same router may host already (its mapping is
-           left alone: a port the router maps to another address is skipped) */
         u16 base = *port;
         for (int t = 0; t < 10; t++) {
             u16 p = (u16)(base + t);
             if (t && net_p2p_open(p) != p)
-                continue;                                     /* taken on this PC */
+                continue;
             snprintf(args, sizeof args, "<NewRemoteHost></NewRemoteHost><NewExternalPort>%u</NewExternalPort>"
                                         "<NewProtocol>UDP</NewProtocol>", p);
             char owner[32];
@@ -489,8 +494,6 @@ static int upnp(u32 gw_be, u16 *port, u32 *ext_ip, u16 *ext_port)
     return 0;
 }
 
-/* hosting */
-
 static DWORD WINAPI host_work(void *arg)
 {
     LONG gen = (LONG)(intptr_t)arg;
@@ -504,14 +507,11 @@ static DWORD WINAPI host_work(void *arg)
     int natpmp_on = 0;
     u32 gw = 0, local = 0;
     if (net_test_ip()) {
-        ext_ip = net_test_ip(), ext_port = port;                 /* testing: no mapping */
+        ext_ip = net_test_ip(), ext_port = port;
     } else if (default_route(&gw, &local)) {
         if (natpmp(gw, port, 60, &ext_ip, &ext_port) && !is_private(ext_ip)) {
             natpmp_on = 1;
             if (ext_port != port) {
-                /* ProtonVPN hands out its own port and forwards it to the same port here: the tunnel moves
-                   there, and the mapping is asked again with that port on both sides (a home router then
-                   maps it straight through as well) */
                 u16 moved = net_p2p_open(ext_port);
                 if (moved == ext_port) {
                     port = moved;
@@ -539,9 +539,7 @@ static DWORD WINAPI host_work(void *arg)
     clip_put(room_code);
     snprintf(host_msg, sizeof host_msg, "ROOM CODE  %s  (copied) - send it to your friend", room_code);
     host_state = 2;
-    /* not the code itself: it holds this PC's public address (privacy) */
     rt_log("[p2p] hosting: room code copied (UDP %u)\n", ext_port);
-    /* NAT-PMP mappings (ProtonVPN's: 60 s) are renewed while this host runs */
     while (natpmp_on && gen == host_gen) {
         Sleep(45000);
         u32 ip2;
@@ -562,7 +560,7 @@ static void host_start(void)
     unsigned r = 0;
     while (!(r & 0xffffff))
         rand_s(&r);
-    host_key = r & 0xffffff;                  /* a new key, so a new code, every hosting */
+    host_key = r & 0xffffff;
     net_p2p_set_key(host_key);
     joining = 0;
     if (host_thread)
@@ -571,11 +569,8 @@ static void host_start(void)
     rt_log("[p2p] hosting an online server\n");
 }
 
-/* joining */
-
 static void join_start(void)
 {
-    /* the room code comes from the form (JoinMenu's update hook opens it, prefilled from the clipboard) */
     InterlockedIncrement(&host_gen);
     host_state = 0;
     joining = 1;
@@ -585,7 +580,6 @@ static void join_start(void)
     form_open_code = 1;
 }
 
-/* net.c: a UDP socket of the game was bound */
 void p2p_bound(u16 port)
 {
     if (!p2p_online)
@@ -596,18 +590,13 @@ void p2p_bound(u16 port)
         join_start();
 }
 
-/* net.c: the game uses its sockets (each frame in the multiplayer menus and races) */
 void p2p_poll(void)
 {
 }
 
-/* the Online tile, the lobby's line */
-
 static DWORD redirect_until;
-static int note_pending;              /* ServerTypeMenu's online note, once per Online tile */
+static int note_pending;
 
-/* menu3d.c's hook on the scene's menu push (slot +0x34, the menu's name): right after the Online tile (whose
-   own action in the menu file opens Gameloft Live's login), the host / join menu instead */
 u32 p2p_menu_redirect(u32 name)
 {
     static const char server_type[] = "ServerTypeMenu";
@@ -623,11 +612,8 @@ u32 p2p_menu_redirect(u32 name)
 void __real_F_1bb6c0(CPU *c);
 void __wrap_F_1bb6c0(CPU *c)
 {
-    /* GameTypeMenu's handler: [ev+4] the button's name, [ev+8] 6 = released on it */
     u32 ev = c->r[1];
     const char *name = rd32(ev + 4) ? (const char *)GP(rd32(ev + 4)) : "";
-    /* PLAYER_NAME: the name tile opens the form; the form's OK (the update popup's btnNo) must not reach the
-       handler's own case for it (the App Store) */
     if (!strcmp(name, "btnPCName") && rd32(ev + 8) == 6 && form_kind != 1)
         name_form_pending = 1;
     if (form_kind == 1 && !strcmp(name, "btnNo")) {
@@ -646,8 +632,6 @@ void __wrap_F_1bb6c0(CPU *c)
     }
     int online = !strcmp(name, "btnOnline"), online2 = !strcmp(name, "btnOnline2");
     if (online || online2) {
-        /* the Local tile's case (the Wi-Fi test, game type 1); the menu file's own action for the tile then
-           opens GLLiveLoginMenu, which the menu lookup below turns into ServerTypeMenu */
         static const char local[] = "btnWireless", local2[] = "btnWireless2";
         u32 old = rd32(ev + 4);
         wr32(ev + 4, GA((void *)(online ? local : local2)));
@@ -692,8 +676,6 @@ static void lobby_update_hook(CPU *c)
     rt_call3(GT_FN_SWF_SET_VISIBLE, pl, GA((void *)box), 1);
 }
 
-/* ServerTypeMenu (Host server / Join server): its "no UPnP" note (NoUpNp, the original Online's) says how the
-   online game works, and whether the clipboard holds a room code */
 #define STYPE_UPDATE_SLOT (0x7864f8u + 0x1c)
 #define STYPE_UPDATE_FN 0x1c1d18u
 static void (*stype_update_fn)(CPU *);
@@ -732,14 +714,12 @@ static void stype_update_hook(CPU *c)
             snprintf(text, sizeof text, "ONLINE: to host, press Host server and send the room code. To join, "
                                         "press Join server and type your friend's code.");
     }
-    static int rewrite;                      /* the popup's timeline puts its own text back as it opens */
+    static int rewrite;
     if (note_pending)
         rewrite = 120;
     if (rewrite > 0 && rewrite-- % 10 == 0)
         shown[0] = 0;
     if (strcmp(shown, text) || shown_pl != pl) {
-        /* txtExcuses holds one message per frame label (NoCash, LockedCar, NoMulti, NoClass); only NoCash's
-           is a text field (NoCashText.TxtNoCash): the game opens it at LockedCar */
         snprintf(shown, sizeof shown, "%s", text);
         rt_call4(GT_FN_SWF_GOTO_LABEL, pl, GA((void *)"ServerTypeMenu.NoUpNp.PopupCongrats.txtExcuses"),
                  GA((void *)"NoCash"), 0);
@@ -748,47 +728,30 @@ static void stype_update_hook(CPU *c)
         shown_pl = pl;
     }
     if (note_pending) {
-        /* a popup with OK: once, when the Online tile opened this menu */
         note_pending = 0;
         rt_call3(GT_FN_SWF_SET_VISIBLE, pl, GA((void *)"ServerTypeMenu.NoUpNp"), 1);
     }
 }
 
-/* forms: PLAYER_NAME (GameTypeMenu) and the room code (JoinMenu), typed on the keyboard
-   PLAYER_NAME: the player's name, changed on the multiplayer page (Local, Bluetooth and Online).
-   Why the name was "v" (port fault): the profile's name is UTF-16 (in the save's header a byte length, then 42
-   bytes), but this port made the profile with 8-bit "iPad" written over a buffer that held "profiles.sav", so
-   "iPad\0iles.sav" read as UTF-16 is CJK characters and a 'v', and the multiplayer lists keep the 'v'.  The name
-   in memory: [[0x70c040]] + 4 points to it (a 528-byte heap block); the game saves it with the profile.
-   The forms are the menus' own popups, with their own OK buttons: GameTypeMenu.needToUpdate for the name (opened
-   by btnPCName, tools/swfpatch_name.py) and JoinMenu.DisconnectedPopup for the room code (opened as Join server
-   shows its list in the online game, again by Refresh; prefilled from the clipboard when it holds a code).
-   While a form is open pcinput.c gives it the keyboard: text, Backspace, Ctrl+V, Enter = OK, Esc = close; a form
-   whose menu stopped updating (left by a click elsewhere) closes itself. */
-
 #define NAME_MAX 16
-#define GT_UPDATE_SLOT (0x785f78u + 0x1c)          /* GameTypeMenu */
+#define GT_UPDATE_SLOT (0x785f78u + 0x1c)
 #define GT_UPDATE_FN 0x1bb57cu
-#define JOIN_UPDATE_SLOT (0x7865d8u + 0x1c)        /* JoinMenu */
+#define JOIN_UPDATE_SLOT (0x7865d8u + 0x1c)
 #define JOIN_UPDATE_FN 0x1c26fcu
 #define JOIN_EVENT_SLOT (0x7865d8u + 0x2c)
 #define JOIN_EVENT_FN 0x1c28d4u
 
-enum { FORM_NONE, FORM_NAME, FORM_CODE, FORM_FIRST };   /* FORM_FIRST: FIRST_NAME's name form (the main menu) */
+enum { FORM_NONE, FORM_NAME, FORM_CODE, FORM_FIRST };
 static CRITICAL_SECTION form_cs;
 static volatile int form_kind, form_enter, form_esc, form_open_code;
 static volatile u32 form_tick;
 static volatile LONG form_ver;
 static char form_text[48], form_msg[96];
 
-/* a form whose menu has not updated for 30 drawn frames was left.  The opener sets the tick before it marks the
-   form open: this check runs on the UI thread, and an old tick seen with the open mark closes the form as it
-   opens (a port fault seen in testing).  The tick counts drawn frames, not time, so a slow moment of the game
-   does not close a form either. */
 int p2p_form_open(void)
 {
     if (form_kind && eagl_frames() - form_tick > 30) {
-        form_kind = FORM_NONE;                       /* its menu was left */
+        form_kind = FORM_NONE;
         rt_log("[p2p] form closed: its menu was left\n");
     }
     return form_kind != FORM_NONE;
@@ -807,7 +770,7 @@ static int form_char_ok(int kind, int ch)
 {
     if (kind == FORM_CODE)
         return isalnum(ch) || ch == '-';
-    return ch >= 0x20 && ch < 0x7f && ch != ',' && ch != '\\' && ch != '"';   /* ',' splits the game info */
+    return ch >= 0x20 && ch < 0x7f && ch != ',' && ch != '\\' && ch != '"';
 }
 
 static void form_add(const char *s)
@@ -832,7 +795,6 @@ static void form_add(const char *s)
     InterlockedIncrement(&form_ver);
 }
 
-/* pcinput.c, the main thread: 1 when the event went to a form */
 int p2p_form_event(const SDL_Event *e)
 {
     if (!p2p_form_open())
@@ -881,11 +843,6 @@ int p2p_form_event(const SDL_Event *e)
     return 0;
 }
 
-/* the form in its popup: the title (or a message in its place) in the popup's text field, the typed text in a white
-   input box like Gameloft LIVE's login: the sprite <popup>.Input that tools/swfpatch_name.py adds, shown by
-   its frame "On" (its first frame, "Off", is empty, so the popups' other uses don't show it).  A popup without the
-   box (an unpatched menu file) gets both in its text field.  The popup's timeline puts its own text
-   back as it opens, so it is written again every 10 frames for 2 s after opening. */
 static char box_path[128];
 
 static int box_on(u32 pl, const char *input)
@@ -899,7 +856,6 @@ static int box_on(u32 pl, const char *input)
     return rt_call2(GT_FN_SWF_FIND, pl, GA(box_path)) ? 2 : 0;
 }
 
-/* a closed form's box back to "Off" (also when its menu was left with the form open) */
 static void box_off(u32 pl, const char *input)
 {
     snprintf(box_path, sizeof box_path, "%s.field", input);
@@ -934,8 +890,6 @@ static void form_draw(u32 pl, const char *field, const char *input, const char *
         rt_call4(GT_FN_SWF_SET_TEXT, pl, GA(box_path), GA(val), 1);
 }
 
-/* the player's name */
-
 static u32 name_buf(void)
 {
     u32 player = rd32(GT_PROFILE_SLOT), p = player ? rd32(player) : 0;
@@ -950,7 +904,7 @@ static void name_get(char *out, size_t cap)
         return;
     const u8 *p = GP(b);
     size_t n = 0;
-    if (p[0] && p[1]) {                              /* the port's old 8-bit name */
+    if (p[0] && p[1]) {
         for (; p[n] && n < 20 && n < cap - 1; n++)
             out[n] = p[n] < 0x80 ? (char)p[n] : '?';
     } else {
@@ -970,13 +924,11 @@ static void name_write(const char *s)
     if (!b)
         return;
     u8 *p = GP(b);
-    memset(p, 0, 42);                                /* the save's field: 21 UTF-16 units */
+    memset(p, 0, 42);
     for (int i = 0; s[i] && i < 20; i++)
         p[2 * i] = (u8)s[i];
 }
 
-/* the chosen name is kept in <home>/Library/Preferences/player_name.txt (the game writes its save's header from
-   another copy, so a name put in memory alone is gone at the next start; the save file itself is not touched) */
 static char name_saved[32];
 static int name_loaded;
 
@@ -1015,7 +967,6 @@ static void name_load(void)
     }
 }
 
-/* RED_BULL_BOARD (board.c): the name the player goes by (the chosen one, else the profile's) */
 void p2p_name_now(char *out, size_t cap)
 {
     name_load();
@@ -1027,8 +978,6 @@ void p2p_name_now(char *out, size_t cap)
         snprintf(out, cap, "iPad");
 }
 
-/* each GameTypeMenu frame: the profile's name in memory is the chosen one; with none chosen, the port's old
-   8-bit name is turned into UTF-16 ("iPad" instead of the "v" the multiplayer lists made of it) */
 static void name_apply(void)
 {
     name_load();
@@ -1041,10 +990,8 @@ static void name_apply(void)
     if (name_saved[0] && strcmp(now, name_saved))
         name_write(name_saved);
     else if (!name_saved[0] && q[0] && q[1] && now[0])
-        name_write(now);                             /* 8-bit -> UTF-16 */
+        name_write(now);
 }
-
-/* GameTypeMenu: the name tile and its form */
 
 static void (*gt_update_fn)(CPU *);
 static volatile int name_form_pending;
@@ -1072,10 +1019,10 @@ static void gt_update_hook(CPU *c)
     int opened = 0;
     if (name_form_pending) {
         name_form_pending = 0;
-        form_tick = eagl_frames();                   /* before form_kind: the UI thread checks both */
+        form_tick = eagl_frames();
         form_kind = FORM_NAME;
         form_enter = form_esc = 0;
-        form_set(dev_getenv("GT_FORM_TYPE") ? dev_getenv("GT_FORM_TYPE") : nm, NULL);   /* GT_FORM_TYPE: testing */
+        form_set(dev_getenv("GT_FORM_TYPE") ? dev_getenv("GT_FORM_TYPE") : nm, NULL);
         rt_call4(GT_FN_SWF_GOTO_LABEL, pl, GA((void *)popup), GA((void *)"Show"), 1);
         opened = 1;
         rt_log("[p2p] name form open\n");
@@ -1109,35 +1056,18 @@ static void gt_update_hook(CPU *c)
     }
 }
 
-/* FIRST_NAME: a first start asks the name
-   Port addition: on a first start with no save, a popup asks the name for online multiplayer as soon as the
-   first loading has finished.
-   The original never asks a name (Gameloft LIVE's login, now gone, gave one; the profile's own is the
-   device's).  A start with no save (neither Documents/Profile_Free.0.gts nor Documents/data.sav in the home as the
-   host starts) and no chosen name (player_name.txt) asks for it as soon as the main menu is up after the first
-   loading: in the main menu's yes / no popup NavigationMenu.FlurryPopup (EXIT_BUTTON's question, exitbtn.c), with the
-   white input box tools/swfpatch_name.py adds to it.  Check = OK, cross = LATER (the profile's name stays, and the
-   multiplayer page's NAME tile changes it any time); either way the question is not asked again (the game has made
-   its save by then).  On a first start the game opens its own question in the same moment (MainMenu.Tutorial_00,
-   "Do you want to start the game's quick tutorial?"): hidden while the name form is open, back after it.
-   Keys as in the other forms (pcinput.c): text, Backspace, Ctrl+V, Enter = OK, Esc = LATER; the pad's buttons press
-   the popup's.  GT_FIRST_NAME=0: never asked (nor with GT_LAN_MULTIPLAYER=0); GT_FIRST_NAME=force: asked on any start
-   (testing). */
-
 #define TUTORIAL_Q "MainMenu.Tutorial_00"
-#define CH_VISIBLE 0xab                              /* a character's byte: drawn and hit */
-#define MAIN_UPDATE_SLOT (GT_VT_MAIN_MENU + GT_VT_UPDATE)          /* MainMenu (the first start's main menu) */
+#define CH_VISIBLE 0xab
+#define MAIN_UPDATE_SLOT (GT_VT_MAIN_MENU + GT_VT_UPDATE)
 #define MAIN_UPDATE_FN 0x1dfb50u
 
-static int first_ask;                                /* 1: ask at the main menu, 2: asked */
-static int first_seen;                               /* main menu frames before asking */
-static u32 first_reshow, first_labels;               /* frames: show the popup again / write its labels until */
-static int first_menu = -1;                          /* the form's menu: 0 MainMenu, 1 NavigationMenu */
+static int first_ask;
+static int first_seen;
+static u32 first_reshow, first_labels;
+static int first_menu = -1;
 static int tut_hidden;
-static u8 tut_want;                                  /* the tutorial question's visible byte to put back */
+static u8 tut_want;
 
-/* the popup's paths in the form's menu: MainMenu.FlurryPopup on a first start (NavigationMenu comes after the
-   tutorial question), NavigationMenu.FlurryPopup otherwise; the same sprite, so the same box */
 static char fp_popup[32], fp_yes[64], fp_txtyes[64], fp_yesf[64], fp_nof[64], fp_field[64], fp_input[64];
 
 static void first_paths(int menu)
@@ -1171,12 +1101,7 @@ static void first_show(u32 pl)
     first_labels = eagl_frames() + 120;
 }
 
-/* _root.isInTutorial (as the game sets it, 0x1e30dc / 0x1e33a8: RenderFX's set member 0x50bce0(swf, path, name,
-   as_value *), the value {0, 1 = boolean, .., .., the bool}).  On a first start it is true, and the popup buttons'
-   "Clicked" frames then run the tutorial's step (ActionScript in the button, not the menu's handler: PushMenu
-   NavigationMenu, MainMenu's parts hidden), which a press of the name form's check or cross set off (found in
-   testing).  So it is false from the press until the button's animation has ended, then true again. */
-static u32 tut_var_back, tut_var_pl;                 /* frame to set it true again, the swf */
+static u32 tut_var_back, tut_var_pl;
 static u8 tut_val[16];
 
 static void tut_var(u32 pl, int v)
@@ -1187,10 +1112,6 @@ static void tut_var(u32 pl, int v)
     rt_call4(GT_FN_SWF_SET_MEMBER, pl, GA((void *)"_root"), GA((void *)"isInTutorial"), GA(tut_val));
 }
 
-/* hidden (not drawn, not hit) while the name form is open: the game's tutorial question, and the popup's own
-   tutorial hint (FlurryPopup.Tutorial_06, a green arrow at the check and "Please tap the play button.", shown by
-   the popup's timeline while _root.isInTutorial, as on a first start); any frame that finds one visible (the game
-   showed it) means it is wanted back */
 static u8 hint_want;
 static void hide_one(u32 pl, const char *path, int hide, u8 *want)
 {
@@ -1220,7 +1141,6 @@ static void tut_hide(u32 pl, int hide)
         rt_log("[p2p] the tutorial question %s\n", tut_want ? "back" : "stays hidden (the game had not shown it)");
 }
 
-/* the main menus' updates: MainMenu's (hooked here) and NavigationMenu's (exitbtn.c) */
 static void first_update(u32 pl, int menu)
 {
     if (!pl || !first_ask)
@@ -1234,7 +1154,6 @@ static void first_update(u32 pl, int menu)
     }
     int opened = 0;
     if (first_ask == 1) {
-        /* the main menu is up after the first loading: it has drawn a few frames and has its popup */
         first_paths(menu);
         if (++first_seen < 6 || !rt_call2(GT_FN_SWF_FIND, pl, GA(fp_popup)))
             return;
@@ -1244,16 +1163,16 @@ static void first_update(u32 pl, int menu)
             rt_log("[p2p] first start: no name asked (GT_LAN_MULTIPLAYER=0)\n");
             return;
         }
-        form_tick = eagl_frames();                   /* before form_kind: the UI thread checks both */
+        form_tick = eagl_frames();
         form_kind = FORM_FIRST;
         form_enter = form_esc = 0;
-        form_set(dev_getenv("GT_FORM_TYPE") ? dev_getenv("GT_FORM_TYPE") : "", NULL);   /* GT_FORM_TYPE: testing */
+        form_set(dev_getenv("GT_FORM_TYPE") ? dev_getenv("GT_FORM_TYPE") : "", NULL);
         first_show(pl);
         opened = 1;
         rt_log("[p2p] first start: name form open (frame %u)\n", eagl_frames());
     }
     if (form_kind != FORM_FIRST) {
-        if (tut_hidden) {                            /* closed, or left: the box off, the tutorial question back */
+        if (tut_hidden) {
             box_off(pl, fp_input);
             tut_hide(pl, 0);
         }
@@ -1267,7 +1186,7 @@ static void first_update(u32 pl, int menu)
         opened = 1;
     }
     if ((int)(first_labels - eagl_frames()) > 0 && eagl_frames() % 10 == 0) {
-        flurry_set(pl, fp_yesf, "OK");               /* the popup's timeline puts its own back */
+        flurry_set(pl, fp_yesf, "OK");
         flurry_set(pl, fp_nof, "LATER");
     }
     form_draw(pl, fp_field, fp_input, "YOUR NAME FOR ONLINE RACES:", opened);
@@ -1310,8 +1229,6 @@ static void main_update_hook(CPU *c)
     first_update(rd32(self + 4), 0);
 }
 
-/* the main menus' events (NavigationMenu: exitbtn.c, MainMenu: topcars.c): 1 when the event is the name form's check
-   (OK) or cross (LATER); the menu's own handler then gets it nameless (its FlurryPopup case is the Flurry video's) */
 int p2p_nav_event(CPU *c)
 {
     if (form_kind != FORM_FIRST)
@@ -1326,7 +1243,6 @@ int p2p_nav_event(CPU *c)
         return 0;
     u32 pl = rd32(c->r[0] + 4);
     if (pl && hint_want) {
-        /* the tutorial is on (the popup showed its hint): off until the press's animation has ended */
         if (!tut_var_back)
             tut_var(pl, 0);
         tut_var_pl = pl;
@@ -1337,8 +1253,6 @@ int p2p_nav_event(CPU *c)
             form_enter = 1;
         else
             form_esc = 1;
-        /* an empty OK: the press's own animation closes the popup (the button's "Clicked" frame 30, 10 frames at the
-           menus' 30 a second, then the popup's "Hide"): shown again after it */
         first_reshow = eagl_frames() + 45;
     }
     return 1;
@@ -1361,15 +1275,13 @@ static void first_init(void)
     for (int i = 0; i < 2; i++) {
         snprintf(g, sizeof g, "%s/%s", gt_guest_home, saves[i]);
         if (GetFileAttributesA(gt_host_path(g, p, sizeof p)) != INVALID_FILE_ATTRIBUTES)
-            return;                                  /* a save: not a first start */
+            return;
     }
     if (GetFileAttributesA(name_path(p, sizeof p)) != INVALID_FILE_ATTRIBUTES)
-        return;                                      /* a name chosen before */
+        return;
     first_ask = 1;
     rt_log("[p2p] first start (no save): the name is asked at the main menu\n");
 }
-
-/* JoinMenu: the room code form */
 
 static void join_apply(u32 ip, u16 port, u32 key)
 {
@@ -1393,7 +1305,7 @@ static void join_update_hook(CPU *c)
     static const char ok[] = "JoinMenu.DisconnectedPopup.PopupCongrats.txtOk";
     static const char input[] = "JoinMenu.DisconnectedPopup.PopupCongrats.Input";
     if (pl && form_kind != FORM_CODE && !form_open_code)
-        box_off(pl, input);                          /* a lost connection's message has no box */
+        box_off(pl, input);
     if (!pl || !p2p_online)
         return;
     int opened = 0;
@@ -1404,7 +1316,7 @@ static void join_update_hook(CPU *c)
         u16 port;
         if (clip_get(t, sizeof t) && code_parse(t, &ip, &port, &key) == 1)
             code_make(ip, port, key, code);
-        form_tick = eagl_frames();                   /* before form_kind: the UI thread checks both */
+        form_tick = eagl_frames();
         form_kind = FORM_CODE;
         form_enter = form_esc = 0;
         form_set(dev_getenv("GT_FORM_TYPE") ? dev_getenv("GT_FORM_TYPE") : code, code[0] ? "From the clipboard: press OK." : NULL);
@@ -1440,19 +1352,18 @@ static void join_update_hook(CPU *c)
     }
 }
 
-/* [ev] control, [ev+4] its name, [ev+8] kind (6 = released on it) */
 static void join_event_hook(CPU *c)
 {
     u32 ev = c->r[1];
     const char *name = rd32(ev + 4) ? (const char *)GP(rd32(ev + 4)) : "";
     if (p2p_online && rd32(ev + 8) == 6 && !strcmp(name, "btnRestart") && form_kind != FORM_CODE)
-        form_open_code = 1;                          /* Refresh: the form again */
+        form_open_code = 1;
     if (form_kind == FORM_CODE && !strcmp(name, "btnOk")) {
         u32 path = rt_call1(GT_FN_EVENT_PATH, ev);
         if (path && strstr((const char *)GP(path), "DisconnectedPopup")) {
             if (rd32(ev + 8) == 6)
                 form_enter = 1;
-            static const char none[] = "";             /* the popup's own case (back to the menus) must not see it */
+            static const char none[] = "";
             u32 old = rd32(ev + 4);
             wr32(ev + 4, GA((void *)none));
             join_event_fn(c);

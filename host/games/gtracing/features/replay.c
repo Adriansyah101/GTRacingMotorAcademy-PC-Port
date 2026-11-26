@@ -1,54 +1,19 @@
-/* replay.c -- two replay fixes: REPLAY_UNDIM (the dim replay picture) and REPLAY_ZOOM (the mouse wheel
-   as the iPad's pinch).  Both run once a frame from steer_frame.
-
-   REPLAY_UNDIM (original-game fault, default on): the 3D picture and the HUD (Pos / Lap, speedometer) of a
-   replay were dimmed, the replay bar and the top icons were not.
-   What dims it is LowBarMenu.btnGreyOverlay of the menu SWF (LHBMiNHFKXiiMlHM.FAK, sprite 8: label
-   "Show" fades a grey rectangle in, "Hide" moves it off the stage).  At the end of a race the
-   FinishLinePopup's "Show" plays "Show" on it, as the dark backing of the end-of-race menu; EndMenu is
-   pushed and the LowBarMenu goes to "Focus_Out", which keeps the overlay.  The Replay button (sprite
-   79) only pushes ReplayMenu: the menu player (push 0x50b0a0) hides the old top (EndMenu) and shows
-   the new one, and nothing - no SWF action, nor the native ReplayMenu (vtable 0x789670: 0x29c2b0,
-   0x29c3fc, 0x29c440, 0x29c558) - puts the overlay to "Hide".  Leaving the replay (sprite 935:
-   InReplay = true, LowBarMenu "Show" -> overlay "Show", PushMenu EndMenu) shows it again, so the
-   designers took it as hidden during the replay.  No port fault was found (label lookup, the tolower
-   shim, the menu stack and the visibility all follow the code), so this is taken as the original's
-   oversight; no iPad was at hand to compare.  Found with staged tests on a save copy:
-   hiding only this overlay makes the replay bright, and "Hide" on it at the replay brightens the
-   picture and the HUD.
-   Fix: when a replay runs (race state 13) and ReplayMenu is the top menu, play "Hide" on the overlay
-   once (0x50bc94, gotoAndPlay by label); the game's own exit path shows it again for the end menu.
-   GT_REPLAY_UNDIM=0 keeps the original.
-
-   REPLAY_ZOOM (port addition: the iPad's pinch-to-zoom in the replay, on the mouse wheel).  The game
-   takes a pinch from its own touch queue (0x17c788, once a frame): with two fingers
-   down (pinch active, byte [0x70c06c] = 0x7a273c) and moved, the change of the distance between them
-   (previous - now, so spreading the fingers is negative) goes to [0x70c070] = 0x7a2748.  The replay
-   update (0x139c94) hands minus that to 0x13706c, which adds it to the zoom race +0xac4, clamped to
-   0 .. 0.8 x [0x7711c0], in the replay views 4 .. 6 and (both ways) in view 7; the other views do not
-   zoom (0x13706c still adds to the value there, unclamped).  A mouse has one pointer, so the wheel
-   gives that value itself, in views 4 .. 7 only: up spreads (zooms in), each notch a tenth of the
-   range, eased over a few updates.  It is set for one call of the replay update (vtable slot
-   0x782edc) and put back after, since the game may run that update more or less than once per host
-   frame (set once per host frame it would zoom 1x or 2x the amount).  A real pinch (two
-   touch-screen fingers) keeps the game's own values.
-   GT_REPLAY_ZOOM=0 leaves the wheel unused. */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include "compat.h"
 
 #include "features.h"
 #include "game.h"
 
-#define MENU_HOST 0x7a2564u            /* -> the object whose +0x1b2c is the menu SWF player */
-#define REPLAY_STATE 13                /* race +0x1d84 while a replay runs */
+#define MENU_HOST 0x7a2564u
+#define REPLAY_STATE 13
 
-#define PINCH_ACTIVE 0x7a273cu         /* byte: two fingers are pinching */
-#define PINCH_DELTA 0x7a2748u          /* int: previous distance - distance, read by the replay update */
+#define PINCH_ACTIVE 0x7a273cu
+#define PINCH_DELTA 0x7a2748u
 
-float ui_zoom_wheel;                   /* wheel notches since the last frame (pcinput.c), + = up */
+float ui_zoom_wheel;
 
 static int option(const char *env)
 {
@@ -56,46 +21,18 @@ static int option(const char *env)
     return !(e && *e == '0');
 }
 
-
-/* the race, while a replay runs */
 static u32 replay_race(void)
 {
     u32 g = gt_game(), race = g ? rd32(g + G_RACE) : 0;
     return race && (int)rd32(race + 0x1d84) == REPLAY_STATE ? race : 0;
 }
 
-/* the menus of a MenuFX player are on the screen: Resume does not pop PauseMenu (the stack stays
-   LowBarMenu, PauseMenu, both in state 1 "shown", the clip unchanged); what changes is bit 0x80 of
-   the player's flags at +0xf8: 0x90 while the pause menu shows, 0x10 while the race is driven (also
-   before the first pause, stack empty).  (+0x58 / +0x5c go to -480 at the first Resume and stay
-   there through the next pause: not it.)  Found from a test log: after Resume the pad
-   still took PauseMenu as open, so Cross tapped its hidden buttons instead of shifting up, the
-   pointer stayed, and Options tapped Resume instead of pausing again.
-   The bit is not all of it: the game clears it too when it runs on under a menu that stays on the
-   screen and takes touches - a replay (race state 13, ReplayMenu on top: 0x90 -> 0x10 the frame the
-   replay starts) and the end menu once Next is pressed after an event (state 12, EndMenu on top, its
-   EventsPopup "Congratulations!" / XP / prize / Next).  So once the race is over (state 12 or 13; no
-   one drives it) the race player's menus count as shown when the top menu is in state 1 (shown) and
-   is not a pause menu (one left in the stack from a pause during the race).  Port fault (of
-   the bit test above): the replay menu and the menu after winning an event could not be
-   used with a pad; the log had "pad off the menus" at both.  It had also left
-   REPLAY_UNDIM a one-frame chance to see ReplayMenu (state 13 and the bit set together): a test
-   replay stayed dim.
-   The race may be gone too: after a licence's last test, Next in EndMenu frees the race (G + 0x17ac
-   = 0) and the licence's "Congratulations! / A LICENSE ACQUIRED / Prize / Total / Next" (the event
-   prize screen 0x29f4b0 pays its 9,000 cr there) shows until the main menus are loaded, with the main
-   menus' player G + 0x19d4 not up yet, so the pad and the keys had no menu (log: "pad off the menus
-   ... race off state -1 ... flags 0 / 10").  Port fault (as above): the screen after winning an event could
-   not be used with the pad or the keyboard.  First taken for the race player; the next event still had no pad
-   (flags 0 / 0 after Next) and the code of 0x29f4b0 (0x29f4e8) shows its own player G + 0x1b38.  So
-   with no race the race player's and that player's menus count as shown by the same top-menu test. */
 int menu_shown(u32 pl)
 {
     if (rd32(pl + 0xf8) & 0x80)
         return 1;
     u32 g = gt_game(), race = g ? rd32(g + G_RACE) : 0;
     int st = race ? (int)rd32(race + 0x1d84) : -1;
-    /* with no race, the event prize player G + 0x1b38 as well (see padmenu.c player_now) */
     if (!g || (race && st != 12 && st != REPLAY_STATE)
         || (pl != rd32(g + G_RACE_MENUS) && (race || pl != rd32(g + G_PRIZE_MENUS))))
         return 0;
@@ -104,7 +41,6 @@ int menu_shown(u32 pl)
     return e && rd32(e + 0x58) == 1 && strncmp((const char *)GP(e + 8), "PauseMenu", 9);
 }
 
-/* the menu SWF player when it is set up and shown, and its top menu's name */
 static u32 menu_player(const char **top)
 {
     *top = NULL;
@@ -121,7 +57,6 @@ static u32 menu_player(const char **top)
     return pl;
 }
 
-/* the menu SWF's top menu ("PauseMenu", "ReplayMenu", ...) or NULL (pcinput.c: the pad's pause) */
 const char *menu_top(void)
 {
     const char *top;
@@ -153,11 +88,10 @@ static void replay_undim(u32 race)
     rt_log("[replay] %s -> %s\n", path, label);
 }
 
-/* the wheel's zoom still to give, in the pinch's units (+ = in) */
 static float zoom_pending;
-static int zoom_logs;                          /* the first 40 wheel turns are logged */
-static int hint_turn_frames;                   /* REPLAY_HINT_PAD: the swipe hint's turn, frames left */
-static float hint_turn_from;                   /* its start yaw */
+static int zoom_logs;
+static int hint_turn_frames;
+static float hint_turn_from;
 
 static void replay_zoom(u32 race)
 {
@@ -168,8 +102,6 @@ static void replay_zoom(u32 race)
     ui_zoom_wheel = 0;
     u32 g = gt_game();
     int view = g ? (int)rd32(g + G_REPLAY_VIEW) : -1;
-    /* 0x13706c adds to the value in every view but clamps and uses it only in views 4 .. 7: the wheel
-       is left out of the others, so the value does not run off there */
     if (!on || !race || view < 4 || view > 7 || *(volatile u8 *)GP(PINCH_ACTIVE)) {
         if (fabsf(notches) >= 1 && on && race && zoom_logs++ < 40)
             rt_log("[replay] wheel %+.0f ignored: replay view %d does not zoom (4 .. 7 do)\n", notches, view);
@@ -180,14 +112,12 @@ static void replay_zoom(u32 race)
         int screen = (int)rd32(GT_SCREEN_PX_H);
         float range = 0.8f * (float)(screen > 0 ? screen : 1024);
         zoom_pending += notches * range / 10.0f;
-        if (fabsf(notches) >= 1 && zoom_logs++ < 40)  /* the pad's buttons give a little each frame */
+        if (fabsf(notches) >= 1 && zoom_logs++ < 40)
             rt_log("[replay] wheel %+.0f: zoom %d (range %.0f), replay view %d\n", notches,
                    (int)rd32(race + 0xac4), range, view);
     }
 }
 
-/* the replay update (0x139c94, vtable slot 0x782edc) reads the pinch value once: a part of what the
-   wheel still has to give is put there for that one call, and the value before it put back after */
 #define REPLAY_UPDATE_SLOT 0x782edcu
 #define REPLAY_UPDATE_FN 0x139c94u
 static void (*replay_update_fn)(CPU *);
@@ -198,12 +128,12 @@ static void replay_update_hook(CPU *c)
         replay_update_fn(c);
         return;
     }
-    float step = zoom_pending * 0.25f;         /* eased: a quarter of what is left each update */
+    float step = zoom_pending * 0.25f;
     if (fabsf(step) < 2.0f)
         step = fabsf(zoom_pending) < 2.0f ? zoom_pending : (zoom_pending > 0 ? 2.0f : -2.0f);
     zoom_pending -= step;
     u32 saved = rd32(PINCH_DELTA);
-    wr32(PINCH_DELTA, (u32)(int)lrintf(-step)); /* spreading the fingers is negative */
+    wr32(PINCH_DELTA, (u32)(int)lrintf(-step));
     replay_update_fn(c);
     wr32(PINCH_DELTA, saved);
     u32 race = zoom_pending == 0 ? replay_race() : 0;
@@ -218,7 +148,6 @@ void replay_init(void)
         rt_log("[replay] no wheel zoom\n");
 }
 
-/* GT_WHEEL=frame:notches;... turns the wheel on those frames (testing) */
 static void test_wheel(void)
 {
     static const char *list;
@@ -234,18 +163,10 @@ static void test_wheel(void)
     }
 }
 
-/* REPLAY_TOUCH_ICONS (port addition): with Touch Screen = Off, the replay's three top icons (camera, pinch,
-   swipe) are hidden.  The replay's top icons are the menu SWF's
-   ReplayMenu.btnCamera (the camera, top left: a tap cycles the replay cameras, the C key and the pad do
-   that too) and an unnamed clip of ReplayMenu (sprite 949, depth 7: the pinch-zoom and swipe-turn hints,
-   touch gestures; the wheel and the mouse drag do those, REPLAY_ZOOM).  While Touch Screen is Off
-   (PC_CONTROLS) their visible byte (+0xab) is cleared every frame of a replay (the ReplayMenu's labels
-   place its children again); a hidden clip takes no tap, and the pad's menu pointer skips it.  Touch
-   Screen On: shown again (the same characters only).  GT_REPLAY_TOUCH_ICONS=0 keeps them. */
 #define CH_VISIBLE 0xab
-#define SPR_LIST 0xb8                  /* a sprite's display list: array, count at +0xbc */
+#define SPR_LIST 0xb8
 
-static u32 icons_hidden[8];            /* characters hidden by us */
+static u32 icons_hidden[8];
 static int nicons;
 
 static int unnamed(u32 ch)
@@ -298,7 +219,6 @@ static void replay_touch_icons(u32 race)
     }
     if (!nicons)
         return;
-    /* Touch Screen On: back, if they are still the ReplayMenu's (else the menu SWF was made anew) */
     static const char menu[] = "ReplayMenu";
     u32 host = rd32(MENU_HOST), mp = host ? rd32(host + 0x1b2c) : 0;
     u32 rm = mp && rd32(mp + 0x3c) && rd32(mp + 0x40) ? rt_call2(GT_FN_SWF_FIND, mp, GA((void *)menu)) : 0;
@@ -311,29 +231,12 @@ static void replay_touch_icons(u32 race)
     rt_log("[replay] Touch Screen on: the replay's touch icons shown again\n");
 }
 
-/* REPLAY_PAD (port addition): the replay's 360-degree camera, zoom and time slider on the pad.  While ReplayMenu
-   is on top in a replay:
-   - the right stick turns the camera: a finger held in the middle of the screen and moved with the stick
-     (pcinput.c ui_pad_drag), as the mouse's drag and the iPad's swipe do;
-   - Y / Triangle zooms in, X / Square out, held: what the wheel gives (REPLAY_ZOOM), a notch in 7 frames;
-     the game zooms only in the replay views 4 .. 7 (R1 / C changes the view);
-   - RT / R2 and LT / L2 go 10 s on and back (held: again every quarter second after half a second), by
-     a tap on the replay bar's time slider where that time is, so the game's own slider code seeks
-     (ReplayMenu's event handler 0x29c558: btnTimeSlider pauses the replay while touched, seeks with
-     0x1af678(G + 0x1be4, x / the slider's width) and plays on when let go).  The replay at G + 0x1be4
-     counts in quarter seconds (0x1afcc8 prints (now - start) / 4 as m:ss): start +0x2580, now +0x2584,
-     length +0x2588.
-   The numpad does the same: its digits are the stick's directions (8 up, 2 down, 4 left, 6 right, 7 9 1 3 between, at
-   full tilt), + / - zoom in / out, * / / go 10 s on / back.
-   GT_REPLAY_PAD=0 leaves the pad and the numpad as they were.  Testing: GT_REPLAY_PADTEST=from:to:keys;... holds keys on
-   those frames (L R U D the stick, i o zoom, f b on / back). */
-#define SEEK_STEP 40                           /* 10 s in quarter seconds */
+#define SEEK_STEP 40
 
 void ui_pad_drag(float dx, float dy);
 int ui_pad_dragging(void);
 void ui_pad_tap(float x, float y);
 
-/* a character's box on the stage (twips), from its own bound and its parent's world matrix */
 static int stage_box(u32 ch, float b[4])
 {
     static float rect[4];
@@ -372,9 +275,7 @@ static void replay_seek(u32 pl, int dir)
         return;
     int t = now - start + dir * SEEK_STEP;
     t = t < 0 ? 0 : t > len ? len : t;
-    float frac = ((float)t + 0.5f) / (float)len;   /* the game truncates len x frac */
-    /* a pixel inside the slider's ends: a tap at its very end is past its width for the game (in a
-       test, on from 0:20 of 0:29 tapped at the end and did nothing) */
+    float frac = ((float)t + 0.5f) / (float)len;
     float xt = b[0] + frac * (b[1] - b[0]);
     xt = xt < b[0] + 20 ? b[0] + 20 : xt > b[1] - 20 ? b[1] - 20 : xt;
     float x = xt / 20, y = (b[2] + b[3]) / 2 / 20;
@@ -383,7 +284,6 @@ static void replay_seek(u32 pl, int dir)
            (now - start) / 240, (now - start) / 4 % 60, t / 240, t / 4 % 60, len / 240, len / 4 % 60, x, y);
 }
 
-/* GT_REPLAY_PADTEST: the keys held on this frame */
 static const char *pad_test(void)
 {
     static const char *env;
@@ -408,7 +308,7 @@ void replay_pad(float rx, float ry, int zoom_in, int zoom_out, int on, int back)
     static float speed;
     if (opt < 0) {
         opt = option("GT_REPLAY_PAD");
-        speed = rt_setting_float("GT_REPLAY_PAD_SPEED", 14, 1, 100);   /* stage points a frame at full tilt */
+        speed = rt_setting_float("GT_REPLAY_PAD_SPEED", 14, 1, 100);
     }
     const char *k = pad_test();
     if (*k) {
@@ -417,8 +317,6 @@ void replay_pad(float rx, float ry, int zoom_in, int zoom_out, int on, int back)
         zoom_in |= strchr(k, 'i') != NULL, zoom_out |= strchr(k, 'o') != NULL;
         on |= strchr(k, 'f') != NULL, back |= strchr(k, 'b') != NULL;
     }
-    /* the numpad as the pad: the digits turn (8 up, 2 down, 4 left, 6 right, 7 9 1 3 between), + / - zoom,
-       * / / go 10 s on / back */
     {
         float kx, ky;
         if (numpad_dir(&kx, &ky)) {
@@ -434,11 +332,10 @@ void replay_pad(float rx, float ry, int zoom_in, int zoom_out, int on, int back)
     const char *top = NULL;
     u32 pl = opt && replay_race() ? menu_player(&top) : 0;
     int in_replay = pl && top && !strcmp(top, "ReplayMenu");
-    /* the stick: past a fifth of its travel, faster further out */
     float m = sqrtf(rx * rx + ry * ry);
     static int turning, turn_logs;
     if (!in_replay || m < 0.2f) {
-        if (!hint_turn_frames)                 /* the swipe hint's own drag (replay_hint) goes on */
+        if (!hint_turn_frames)
             ui_pad_drag(0, 0);
         turning = 0;
     } else {
@@ -469,16 +366,6 @@ void replay_pad(float rx, float ry, int zoom_in, int zoom_out, int on, int back)
     seek_was = dir;
 }
 
-/* REPLAY_HINT_PAD (padmenu.c): Cross on the replay's pinch or swipe hint does that gesture.
-   - The pinch (which 1): a step of a quarter of the zoom range (race +0xac4, 0 .. 0.8 x [0x7711c0]) inwards, given
-     as the wheel's zoom is (REPLAY_ZOOM, eased over a few updates); from the last step (the closest view) back to
-     0, the normal view.  The game zooms in the replay views 4 .. 7 only; in the others the press is logged.
-   - The swipe (which 2): the free camera turned by 90 degrees, by a finger held in the middle of the screen and
-     moved sideways (pcinput.c ui_pad_drag), as the mouse's drag and the iPad's swipe do.  The turn is the replay
-     camera's yaw, race +0xac0 (radians: a test drag of 120 frames moved it by 1.6), read each frame: the drag
-     stops once it has turned a quarter turn (in a test in view 4: 90 degrees in 55 frames, the car seen from its
-     side), or after 2 s whatever it reached.  As with the zoom, only the views 4 .. 7 turn; in the others the
-     press is logged.  A change of view sets the yaw back, as after a mouse drag. */
 void replay_hint(int which)
 {
     u32 race = replay_race(), g = gt_game();
@@ -492,13 +379,12 @@ void replay_hint(int which)
             rt_log("[replay] pinch hint: replay view %d does not zoom (4 .. 7 do)\n", view);
             return;
         }
-        /* four steps: the step nearest the zoom now, then the next (the zoom is kept in whole units) */
         float step = range / 4, level = floorf(now / step + 0.5f);
         float to = level >= 4 ? 0 : fminf((level + 1) * step, range);
         zoom_pending += to - now;
         rt_log("[replay] pinch hint: zoom %.0f -> %.0f of %.0f (replay view %d)\n", now, to, range, view);
     } else {
-        if (view < 4 || view > 7) {     /* the views 1 .. 3 take no turn (tested in 2 and 3: the yaw stayed 0) */
+        if (view < 4 || view > 7) {
             rt_log("[replay] swipe hint: replay view %d does not turn (4 .. 7 do)\n", view);
             return;
         }
@@ -510,7 +396,6 @@ void replay_hint(int which)
     }
 }
 
-/* the swipe hint's turn, once a frame while it lasts */
 static void replay_hint_turn(u32 race)
 {
     if (!hint_turn_frames)
@@ -528,7 +413,7 @@ static void replay_hint_turn(u32 race)
         hint_turn_frames = 0;
         return;
     }
-    ui_pad_drag(d > 0.8f * quarter ? 6.0f : 14.0f, 0);   /* slower near the end, so it stops close to 90 */
+    ui_pad_drag(d > 0.8f * quarter ? 6.0f : 14.0f, 0);
 }
 
 void replay_frame(void)

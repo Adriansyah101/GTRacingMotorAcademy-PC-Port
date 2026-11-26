@@ -1,23 +1,3 @@
-/* crashdump.c -- CRASH_DUMP (port addition): a minidump and a message box when the game crashes, as the Fast Five
-   host's core/crashdump.c and f5_fatal.
-
-   Why: without it a crash (main.c on_fault) or a stop (rt_fatal: abort, std::terminate, out of memory ...) only
-   writes its lines to the log and the window disappears, with no word to the player and only the log to send.
-   With it:
-   - gtracing.dmp is written next to gtracing.log (a minidump: the threads' registers and stacks and the list of
-     modules, with no module's folder).  The host addresses in it are named by build\host\gtracing.map.
-     It is written on a thread of its own: the stopped thread may have overflowed its stack, and
-     MiniDumpWriteDump suspends every other thread while it reads them.  dbghelp comes from System32 and only
-     when a crash happens, so a normal run never loads it.
-   - Before the file is kept, every copy of the folders the log hides and of the environment's values (the
-     Windows user's name, the PC's) is blanked (scrub.c).  A file that cannot be cleaned is deleted.
-   - A box tells the player the game has to stop and which files to send.  It runs on a thread of its own: the
-     stopped thread may own the game's window.  The sound stops first (no loop of the last buffer while the box is
-     up), the mouse is let go, and a window that covers its whole monitor (full screen) is minimised so the box
-     shows.  A test run (GT_QUIT_AT set) has no one to answer it, so it has no box.
-   GT_CRASH_DUMP=0: no dump (the log and the box stay).  A stop before the game ran (no .app, a broken exe) has
-   no dump: there is nothing of the game in it.
-   GT_CRASH_TEST=<frame> (testing): a host write to an address no one has, on that frame. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,17 +12,16 @@ typedef BOOL(WINAPI *minidump_fn)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUM
 
 enum { DUMP_WAIT_MS = 20000 };
 
-int gt_game_running;                    /* main.c: set once the game's own code starts */
-static char dump_path[MAX_PATH * 2];    /* empty: no dump this run */
+int gt_game_running;
+static char dump_path[MAX_PATH * 2];
 static EXCEPTION_POINTERS *volatile crash_ep;
 static volatile DWORD crash_tid, writer_tid;
 static HANDLE dump_file = INVALID_HANDLE_VALUE;
-static const char *volatile dump_err;   /* why there is no file; NULL = it is there */
+static const char *volatile dump_err;
 
 void rt_scrub_bytes(unsigned char *d, size_t n);
 void rt_scrub_names(unsigned char *d, size_t n);
 
-/* log: the log's file; the dump is the same name with .dmp */
 void gt_dump_arm(const char *log)
 {
     const char *e = getenv("GT_CRASH_DUMP");
@@ -55,11 +34,8 @@ void gt_dump_arm(const char *log)
     if (dot && (!sep || dot > sep))
         *dot = 0;
     strncat(dump_path, ".dmp", sizeof dump_path - strlen(dump_path) - 1);
-    /* an old crash's dump stays (the player may start the game again before sending it); the next crash's
-       replaces it */
 }
 
-/* The first fault is the one the dump is opened on. */
 void gt_dump_note(EXCEPTION_POINTERS *ep)
 {
     if (!InterlockedCompareExchangePointer((void *volatile *)&crash_ep, ep, NULL))
@@ -71,11 +47,10 @@ int gt_dump_is_writer(void)
     return writer_tid && writer_tid == GetCurrentThreadId();
 }
 
-/* The stacks' memory in the file (the memory list): where a path can sit half overwritten by another string. */
 static void scrub_memory(unsigned char *d, DWORD n)
 {
     const MINIDUMP_HEADER *h = (const MINIDUMP_HEADER *)d;
-    if (n < sizeof *h || h->Signature != 0x504d444du /* "MDMP" */ || h->StreamDirectoryRva > n ||
+    if (n < sizeof *h || h->Signature != 0x504d444du || h->StreamDirectoryRva > n ||
         h->NumberOfStreams > (n - h->StreamDirectoryRva) / sizeof(MINIDUMP_DIRECTORY))
         return;
     const MINIDUMP_DIRECTORY *dir = (const MINIDUMP_DIRECTORY *)(d + h->StreamDirectoryRva);
@@ -129,7 +104,7 @@ static DWORD WINAPI dump_thread(void *unused)
     if (!write(GetCurrentProcess(), GetCurrentProcessId(), dump_file, type, crash_ep ? &ex : NULL, NULL, NULL))
         dump_err = "MiniDumpWriteDump failed";
     else if (!scrub_file(dump_file))
-        dump_err = "cannot clean the file";     /* a file that still names the folders is not kept */
+        dump_err = "cannot clean the file";
     return 0;
 }
 
@@ -157,13 +132,10 @@ static int dump_write(void)
         rt_log("[crash] no dump: %s\n", dump_err);
         return 0;
     }
-    /* the file's name only: with GT_LOG elsewhere the folder is not one the log hides (scrub.c) */
     const char *base = strrchr(dump_path, '\\');
     rt_log("[crash] wrote %s, next to the log\n", base ? base + 1 : dump_path);
     return 1;
 }
-
-/* the box */
 
 static wchar_t box_text[2048];
 static volatile LONG crash_owner;
@@ -193,15 +165,14 @@ static DWORD WINAPI box_thread(void *unused)
     return 0;
 }
 
-/* The way every crash and stop ends: the log's line, the dump, the box, the end of the process. */
 __attribute__((noreturn)) void gt_crash(int code, const char *why)
 {
     DWORD me = GetCurrentThreadId();
     if (InterlockedCompareExchange(&crash_owner, (LONG)me, 0)) {
         if ((DWORD)crash_owner == me || box_tid == me)
-            ExitProcess((UINT)code);    /* the stop itself failed: no second box */
+            ExitProcess((UINT)code);
         for (;;)
-            Sleep(INFINITE);            /* another thread is already stopping the game */
+            Sleep(INFINITE);
     }
     rt_log("\n[FATAL] %s\n", why);
     int dumped = dump_write();
@@ -211,7 +182,7 @@ __attribute__((noreturn)) void gt_crash(int code, const char *why)
         ExitProcess((UINT)code);
     }
     static char text[2048];
-    int logged = rt_log_enabled();      /* GT_LOG=0: no log file to send */
+    int logged = rt_log_enabled();
     snprintf(text, sizeof text,
              GT_GAME_TITLE " has to stop.\n\n%s\n\n%s", why,
              dumped && logged ? "The details are in gtracing.log and gtracing.dmp, next to the game's program. "
@@ -234,8 +205,6 @@ __attribute__((noreturn)) void gt_crash(int code, const char *why)
         box_thread(NULL);
     ExitProcess((UINT)code);
 }
-
-/* GT_CRASH_TEST */
 
 void gt_crash_test_tick(u32 frame)
 {
